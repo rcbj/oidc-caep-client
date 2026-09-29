@@ -11,5 +11,7 @@
     "express": "^5.2.1",
     "oidc-caep-client": "0.1.0",
     "jose": "^6.2.12"
-  }
+  },
+  "license": "MIT",
+  "author": "Iya CyberSecurity Solutions, LLC"
 }

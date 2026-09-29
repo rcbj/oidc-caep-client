@@ -232,3 +232,7 @@ Refreshes are coalesced per process. If several instances share a store, seriali
 ```sh
 npm test   # from the repo root; uses an in-memory provider stub injected via the `fetch` option
 ```
+
+## License
+
+MIT © 2026 Iya CyberSecurity Solutions, LLC. See [LICENSE](LICENSE).
