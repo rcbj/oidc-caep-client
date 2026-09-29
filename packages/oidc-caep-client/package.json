@@ -1,7 +1,7 @@
 {
   "name": "oidc-caep-client",
   "version": "0.1.0",
-  "description": "OpenID Connect relying-party client with token caching/auto-refresh and a Shared Signals (SSF) / CAEP event receiver",
+  "description": "In-browser OpenID Connect public client (PKCE, PAR, DPoP, RFC 9207) with token caching/auto-refresh and a Shared Signals (SSF) / CAEP event receiver",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -16,14 +16,19 @@
     "test": "node --test test/*.test.js"
   },
   "keywords": [
+    "browser",
+    "caep",
+    "dpop",
+    "oauth2",
     "oidc",
     "openid",
-    "oauth2",
-    "caep",
-    "ssf",
-    "shared-signals",
+    "par",
+    "pkce",
+    "public-client",
     "risc",
-    "secevent"
+    "secevent",
+    "shared-signals",
+    "ssf"
   ],
   "license": "MIT",
   "engines": {

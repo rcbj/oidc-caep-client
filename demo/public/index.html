@@ -3,15 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>CAEP Demo</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/styles.css">
+  <script type="importmap">{"imports":{"jose":"/vendor/jose/index.js","oidc-caep-client":"/lib/index.js"}}</script>
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       <span class="logo" aria-hidden="true">◆</span>
       <span>CAEP Demo</span>
-      <span class="tag">oidc-caep-client</span>
+      <span class="tag">oidc-caep-client · in-browser public client</span>
     </div>
     <div class="who" id="who"></div>
   </header>
@@ -35,7 +38,7 @@
         </div>
 
         <form id="config-form" novalidate>
-          <p class="muted small intro">Point this app at any OpenID Connect Core 1.0 provider. It configures itself from the provider's metadata document.</p>
+          <p class="muted small intro">Point this app at any OpenID Connect Core 1.0 provider. It runs entirely in this browser as a <strong>public client</strong> (no client secret) and configures itself from the provider's metadata document.</p>
 
           <label for="discovery-url">Issuer or discovery URL</label>
           <div class="inline">
@@ -49,20 +52,13 @@
           <p class="hint" id="metadata-summary"></p>
 
           <div class="mode" role="radiogroup" aria-label="Client registration">
-            <label class="mode-opt"><input type="radio" name="reg-mode" value="static" checked> <span><strong>Use an existing client</strong><span class="muted small">Enter a client_id you already registered</span></span></label>
+            <label class="mode-opt"><input type="radio" name="reg-mode" value="static" checked> <span><strong>Use an existing client</strong><span class="muted small">A public client_id you already registered</span></span></label>
             <label class="mode-opt" id="dcr-opt"><input type="radio" name="reg-mode" value="dynamic"> <span><strong>Register a new client</strong><span class="muted small" id="dcr-note">OpenID Connect Dynamic Client Registration</span></span></label>
           </div>
 
-          <div id="static-fields" class="grid2">
-            <div>
-              <label for="client-id">client_id <span class="req">required</span></label>
-              <input id="client-id" autocomplete="off" spellcheck="false">
-            </div>
-            <div>
-              <label for="client-secret">client_secret <span class="muted">optional</span></label>
-              <input id="client-secret" type="password" autocomplete="new-password" spellcheck="false">
-              <label class="check small" id="clear-secret-row" hidden><input type="checkbox" id="clear-secret"> Remove stored secret</label>
-            </div>
+          <div id="static-fields">
+            <label for="client-id">client_id <span class="req">required</span></label>
+            <input id="client-id" autocomplete="off" spellcheck="false">
           </div>
 
           <div id="dynamic-fields" class="grid2" hidden>
@@ -84,47 +80,55 @@
           <select id="id-token-alg"><option value="">Automatic (RS256)</option></select>
           <p class="hint" id="alg-hint"></p>
 
+          <fieldset class="security">
+            <legend>Security</legend>
+            <label class="check"><input type="checkbox" id="use-dpop" checked> DPoP: bind tokens to a non-extractable key in this browser (RFC 9449)</label>
+            <div class="grid2">
+              <div>
+                <label for="par-mode">Pushed Authorization Requests (RFC 9126)</label>
+                <select id="par-mode">
+                  <option value="auto">When the IdP offers it</option>
+                  <option value="always">Always</option>
+                  <option value="never">Never (unless the IdP requires it)</option>
+                </select>
+              </div>
+              <div>
+                <label for="token-storage">Tokens are kept in</label>
+                <select id="token-storage">
+                  <option value="memory">Memory only (sign in again after a reload)</option>
+                  <option value="session">sessionStorage (survive reloads in this tab)</option>
+                </select>
+              </div>
+            </div>
+            <p class="hint" id="storage-hint"></p>
+          </fieldset>
+
           <details class="advanced">
             <summary>Advanced OIDC settings</summary>
             <div class="grid2">
               <div>
-                <label for="auth-method">Token endpoint auth method</label>
-                <select id="auth-method">
-                  <option value="">Automatic</option>
-                  <option value="client_secret_basic">client_secret_basic</option>
-                  <option value="client_secret_post">client_secret_post</option>
-                  <option value="none">none (public client + PKCE)</option>
-                </select>
-              </div>
-              <div>
                 <label for="scope">Scope</label>
                 <input id="scope" placeholder="openid profile email offline_access" spellcheck="false">
+              </div>
+              <div>
+                <label for="resource">Resource indicator (RFC 8707) <span class="muted">optional</span></label>
+                <input id="resource" placeholder="https://api.example.com/" spellcheck="false">
+              </div>
+              <div>
+                <label for="acr-values">acr_values <span class="muted">optional, enforced</span></label>
+                <input id="acr-values" placeholder="e.g. mfa" spellcheck="false">
               </div>
             </div>
           </details>
 
           <fieldset class="caep">
-            <legend><label class="check"><input type="checkbox" id="caep-enabled" checked> Subscribe to CAEP events (Shared Signals)</label></legend>
+            <legend><label class="check"><input type="checkbox" id="caep-enabled" checked> Subscribe to CAEP events (Shared Signals, poll)</label></legend>
+            <p class="hint">The stream is created with the signed-in user's access token and polled from this browser (RFC 8936). A browser cannot receive pushed events.</p>
             <div class="grid2">
               <div>
                 <label for="ssf-issuer">SSF transmitter issuer</label>
                 <input id="ssf-issuer" placeholder="Filled from the OIDC issuer" spellcheck="false">
                 <p class="hint" id="ssf-issuer-hint"></p>
-              </div>
-              <div>
-                <label for="ssf-delivery">Delivery method</label>
-                <select id="ssf-delivery">
-                  <option value="poll">Poll (RFC 8936)</option>
-                  <option value="push">Push (RFC 8935)</option>
-                </select>
-              </div>
-              <div>
-                <label for="ssf-auth">Management API credential</label>
-                <select id="ssf-auth">
-                  <option value="user">Signed-in user's access token</option>
-                  <option value="client_credentials">Client credentials grant</option>
-                  <option value="token">Static bearer token</option>
-                </select>
               </div>
               <div>
                 <label for="ssf-max-age">Max event age (seconds)</label>
@@ -138,24 +142,13 @@
                 </select>
               </div>
             </div>
-            <label class="check"><input type="checkbox" id="ssf-only-users" checked> Only receive events about signed-in users (add them as stream subjects)</label>
-            <p class="hint">Off: nothing is added, and a transmitter with <code>default_subjects: ALL</code> sends events about every user.</p>
+            <label class="check"><input type="checkbox" id="ssf-only-users" checked> Only receive events about the signed-in user (add them as a stream subject)</label>
             <p class="field-label">Events to request</p>
             <div class="event-picks" id="ssf-events-pick"></div>
-            <p class="hint" id="ssf-auth-hint"></p>
-            <div id="ssf-scope-row">
-              <label for="ssf-scope">Client credentials scope</label>
-              <input id="ssf-scope" placeholder="e.g. ssf:read ssf:write" spellcheck="false">
-            </div>
-            <div id="ssf-token-row">
-              <label for="ssf-token">Management API bearer token</label>
-              <input id="ssf-token" type="password" autocomplete="off" spellcheck="false">
-            </div>
-            <p class="hint" id="push-warning" hidden>Push delivery needs the push endpoint below to be reachable from the transmitter. For a local app, use poll.</p>
           </fieldset>
 
           <div class="register">
-            <p class="small"><strong>Register these with your IdP</strong></p>
+            <p class="small"><strong>Register these with your IdP</strong> (public client, token_endpoint_auth_method <code>none</code>)</p>
             <dl class="kv" id="register-urls"></dl>
           </div>
 
@@ -171,8 +164,15 @@
       <section class="card hero" id="signed-out" hidden>
         <p class="eyebrow">OpenID Connect + Shared Signals</p>
         <h1>Continuous access, in real time.</h1>
-        <p class="muted">Sign in through your identity provider. The server caches your tokens, refreshes them before they expire, and listens for CAEP events that can change or end your session while you're using it.</p>
-        <a class="btn primary" href="/login">Sign in</a>
+        <p class="muted">Sign in through your identity provider. This page keeps your tokens, refreshes them before they expire, and listens for CAEP events that can change or end your session while you're using it.</p>
+        <button class="btn primary" id="btn-signin-hero" type="button">Sign in</button>
+      </section>
+
+      <section class="card" id="security-card" hidden>
+        <div class="card-head">
+          <h2>Protections in effect</h2>
+        </div>
+        <ul class="checks" id="security-list"></ul>
       </section>
 
       <!-- Signed-in session -->
@@ -232,10 +232,10 @@
     <section class="card log-card">
       <div class="card-head">
         <h2>Event log</h2>
-        <span class="live" id="live"><span class="dot"></span>live</span>
+        <span class="live" id="live"><span class="dot"></span>polling</span>
       </div>
       <ol class="log" id="log"></ol>
-      <p class="muted empty" id="log-empty">No CAEP events yet. Sign in, then trigger an event at your identity provider (for example, revoke the user's session).</p>
+      <p class="muted empty" id="log-empty">No CAEP events yet. Sign in, then trigger an event at your identity provider (for example, revoke your session).</p>
     </section>
   </main>
 

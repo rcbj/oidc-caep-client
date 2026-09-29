@@ -1,7 +1,7 @@
-import { EventEmitter } from 'node:events';
 import { OAuthError, OIDCClientError } from './errors.js';
 import { MemoryTokenStore } from './stores.js';
 import { TokenSet } from './token-set.js';
+import { Emitter } from './util.js';
 
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
@@ -11,7 +11,6 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
  * - `getAccessToken(key)` always returns a token valid for at least `refreshSkewSec`, refreshing on demand.
  * - With `autoRefresh` (default), a timer refreshes each token `refreshSkewSec` before it expires.
  * - Concurrent refreshes for the same key are coalesced into one token-endpoint call.
- * - Client-credentials tokens are cached per scope/resource and re-requested when near expiry.
  *
  * Events:
  *   "refreshed"      (key, tokenSet)  — new tokens obtained via refresh_token
@@ -19,12 +18,11 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
  *   "expired"        (key)            — tokens for key could not be renewed and were removed
  *   "removed"        (key)            — tokens deleted via delete()
  */
-export class TokenManager extends EventEmitter {
+export class TokenManager extends Emitter {
   #client;
   #store;
   #timers = new Map();
   #inflight = new Map();
-  #ccCache = new Map();
   #opts;
 
   /**
@@ -58,18 +56,8 @@ export class TokenManager extends EventEmitter {
    * @param {{ forceRefresh?: boolean }} [opts]
    * @returns {Promise<string>}
    */
-  async getAccessToken(key, { forceRefresh = false } = {}) {
-    let ts = await this.get(key);
-    if (!ts) throw new OIDCClientError(`No tokens cached for ${key}`, { code: 'no_tokens' });
-    if (forceRefresh || ts.isExpired(this.#opts.refreshSkewSec)) {
-      if (ts.refresh_token) {
-        ts = await this.refresh(key);
-      } else if (ts.isExpired()) {
-        await this.#drop(key, 'expired');
-        throw new OIDCClientError('Access token expired and no refresh_token is available', { code: 'token_expired' });
-      }
-    }
-    return ts.access_token;
+  async getAccessToken(key, opts) {
+    return (await this.getTokenSet(key, opts)).access_token;
   }
 
   /**
@@ -121,25 +109,25 @@ export class TokenManager extends EventEmitter {
   }
 
   /**
-   * Returns a cached client-credentials access token, requesting a new one when near expiry.
-   * @param {{ scope?: string, resource?: string, audience?: string }} [params]
-   * @returns {Promise<string>}
+   * Returns the cached TokenSet for key, refreshing first if the access token is (nearly) expired.
+   * Use this rather than getAccessToken() when the token may be DPoP-bound: the caller needs its
+   * token_type to build the right Authorization header (OIDCClient.resourceHeaders()).
+   * @param {string} key
+   * @param {{ forceRefresh?: boolean }} [opts]
+   * @returns {Promise<TokenSet>}
    */
-  async getClientCredentialsToken(params = {}) {
-    const key = JSON.stringify([params.scope, params.resource, params.audience]);
-    const cached = this.#ccCache.get(key);
-    if (cached && !(cached instanceof Promise) && !cached.isExpired(this.#opts.refreshSkewSec)) return cached.access_token;
-    if (cached instanceof Promise) return (await cached).access_token;
-    const p = this.#client.clientCredentials(params);
-    this.#ccCache.set(key, p);
-    try {
-      const ts = await p;
-      this.#ccCache.set(key, ts);
-      return ts.access_token;
-    } catch (err) {
-      this.#ccCache.delete(key);
-      throw err;
+  async getTokenSet(key, { forceRefresh = false } = {}) {
+    let ts = await this.get(key);
+    if (!ts) throw new OIDCClientError(`No tokens cached for ${key}`, { code: 'no_tokens' });
+    if (forceRefresh || ts.isExpired(this.#opts.refreshSkewSec)) {
+      if (ts.refresh_token) {
+        ts = await this.refresh(key);
+      } else if (ts.isExpired()) {
+        await this.#drop(key, 'expired');
+        throw new OIDCClientError('Access token expired and no refresh_token is available', { code: 'token_expired' });
+      }
     }
+    return ts;
   }
 
   /** Cancels all refresh timers (call on shutdown). */

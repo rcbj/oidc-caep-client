@@ -1,10 +1,10 @@
-import { timingSafeEqual } from 'node:crypto';
 import { createRemoteJWKSet, customFetch, decodeProtectedHeader, errors as joseErrors, jwtVerify } from 'jose';
 import { ASYMMETRIC_JWS_ALGS } from '../algs.js';
 import { discoverSSFTransmitter } from '../discovery.js';
 import { OAuthError, SETValidationError, SSFError } from '../errors.js';
 import { httpRequest, readJson } from '../http.js';
-import { randomToken } from '../pkce.js';
+import { wantsDpopNonce } from '../dpop.js';
+import { randomToken } from '../util.js';
 import { CAEP, DELIVERY, eventName, SSF } from './constants.js';
 
 
@@ -52,13 +52,15 @@ const NAMED_HANDLERS = {
 /**
  * @typedef {object} SSFReceiverConfig
  * @property {string} transmitterIssuer  SSF transmitter issuer; metadata is loaded from its `/.well-known/ssf-configuration`.
- * @property {'push'|'poll'} [deliveryMethod]  Default "push".
- * @property {string} [pushEndpointUrl]  Public URL of your push endpoint (required for push).
+ * Delivery is RFC 8936 POLL: a browser cannot receive a push. (SETs obtained any other way can still be
+ * handed to `receiveSet()`.)
  * @property {string|string[]} [audience]  Expected SET `aud`. Defaults to the `aud` in the stream configuration.
  * @property {string[]} [eventsRequested]  Default: all CAEP event types.
- * @property {() => Promise<string>|string} [accessToken]  Bearer token for the transmitter management API.
+ * @property {() => Promise<string>|string} [accessToken]  Bearer token for the transmitter's management and poll endpoints.
+ * @property {(req: { method: string, url: string, nonce?: string }) => Promise<Record<string,string>>} [authorizationHeaders]
+ *           Alternative to `accessToken`: returns the Authorization (and DPoP) headers for one request, e.g.
+ *           `(r) => oidcClient.resourceHeaders(tokenSet, r)` for a DPoP-bound token.
  * @property {string} [streamId]        Use an existing stream instead of creating one.
- * @property {string} [pushAuthorizationHeader]  Expected Authorization header on push requests. Generated when a stream is created.
  * @property {string} [description]
  * @property {number} [pollIntervalMs]  Default 5000.
  * @property {number} [maxEvents]       Max SETs per poll. Default 25.
@@ -103,7 +105,6 @@ export class SSFReceiver {
   constructor(config) {
     if (!config?.transmitterIssuer) throw new TypeError('transmitterIssuer is required');
     this.#cfg = {
-      deliveryMethod: 'push',
       eventsRequested: Object.values(CAEP),
       pollIntervalMs: 5000,
       maxEvents: 25,
@@ -115,9 +116,8 @@ export class SSFReceiver {
       description: 'oidc-caep-client receiver',
       ...config,
     };
-    if (!['push', 'poll'].includes(this.#cfg.deliveryMethod)) throw new TypeError('deliveryMethod must be "push" or "poll"');
-    if (this.#cfg.deliveryMethod === 'push' && !this.#cfg.pushEndpointUrl) {
-      throw new TypeError('pushEndpointUrl is required for push delivery');
+    if (this.#cfg.deliveryMethod && this.#cfg.deliveryMethod !== 'poll') {
+      throw new TypeError('Only poll delivery (RFC 8936) is supported: a browser cannot receive a push');
     }
     for (const [name, fn] of Object.entries(this.#cfg.handlers ?? {})) {
       if (name === 'any') this.onAnyEvent(fn);
@@ -190,10 +190,9 @@ export class SSFReceiver {
       timeoutDuration: c.httpTimeoutMs,
       ...(c.fetch ? { [customFetch]: c.fetch } : {}),
     });
-    const method = c.deliveryMethod === 'push' ? DELIVERY.PUSH : DELIVERY.POLL;
     const supported = this.metadata.delivery_methods_supported;
-    if (supported && !supported.includes(method)) {
-      throw new SSFError(`Transmitter does not support ${c.deliveryMethod} delivery (${method})`);
+    if (supported && !supported.includes(DELIVERY.POLL)) {
+      throw new SSFError(`Transmitter does not support poll delivery (${DELIVERY.POLL})`);
     }
     return this.metadata;
   }
@@ -220,7 +219,7 @@ export class SSFReceiver {
     } else {
       throw new SSFError('Transmitter has no configuration_endpoint and no streamId was supplied');
     }
-    if (this.#cfg.deliveryMethod === 'poll') this.#startPolling();
+    this.#startPolling();
     return this.stream;
   }
 
@@ -330,44 +329,13 @@ export class SSFReceiver {
       this.#pendingVerifications.delete(state);
       throw err;
     }
-    if (this.#cfg.deliveryMethod === 'poll') this.pollNow();
+    this.pollNow();
     return received;
   }
 
   // ---------------------------------------------------------------------------
   // Delivery
   // ---------------------------------------------------------------------------
-
-  /**
-   * RFC 8935 push endpoint as a Node/Express/Connect-compatible `(req, res)` handler.
-   * Works with or without a body parser; mount it on the path given as `pushEndpointUrl`.
-   * Responds 202 once the SET is validated; handlers run asynchronously afterwards.
-   */
-  pushHandler() {
-    return async (req, res) => {
-      const reply = (status, body) => {
-        res.statusCode = status;
-        if (body) {
-          res.setHeader('content-type', 'application/json');
-          res.end(JSON.stringify(body));
-        } else {
-          res.end();
-        }
-      };
-      if (req.method !== 'POST') return reply(405);
-      try {
-        this.#checkPushAuthorization(req.headers.authorization);
-        const token = await readRawBody(req);
-        const events = await this.validateSet(token);
-        reply(202);
-        this.#dispatchAll(events);
-      } catch (err) {
-        const code = err instanceof SETValidationError ? err.code : 'invalid_request';
-        this.#emitError(err, { phase: 'push' });
-        reply(code === 'authentication_failed' ? 401 : code === 'access_denied' ? 403 : 400, { err: code, description: err.message });
-      }
-    };
-  }
 
   /**
    * Validates a SET and runs its handlers. Use this if you receive SETs through your own transport.
@@ -495,20 +463,7 @@ export class SSFReceiver {
   // ---------------------------------------------------------------------------
 
   #deliveryRequest() {
-    const c = this.#cfg;
-    if (c.deliveryMethod === 'poll') return { method: DELIVERY.POLL };
-    c.pushAuthorizationHeader ??= `Bearer ${randomToken(32)}`;
-    return { method: DELIVERY.PUSH, endpoint_url: c.pushEndpointUrl, authorization_header: c.pushAuthorizationHeader };
-  }
-
-  #checkPushAuthorization(header) {
-    const expected = this.#cfg.pushAuthorizationHeader;
-    if (!expected) return;
-    const a = Buffer.from(header ?? '');
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) {
-      throw new SETValidationError('Missing or invalid Authorization header', 'authentication_failed');
-    }
+    return { method: DELIVERY.POLL };
   }
 
   #startPolling() {
@@ -584,16 +539,30 @@ export class SSFReceiver {
   }
 
   async #mgmt(method, url, body) {
-    const headers = { accept: 'application/json' };
-    if (this.#cfg.accessToken) headers.authorization = `Bearer ${await this.#cfg.accessToken()}`;
-    if (body !== undefined) headers['content-type'] = 'application/json';
-    const res = await httpRequest(url, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      timeoutMs: this.#cfg.httpTimeoutMs,
-      fetch: this.#cfg.fetch,
-    });
+    const href = String(url);
+    const send = async (nonce) => {
+      const headers = { accept: 'application/json' };
+      if (this.#cfg.authorizationHeaders) {
+        Object.assign(headers, await this.#cfg.authorizationHeaders({ method, url: href, nonce }));
+      } else if (this.#cfg.accessToken) {
+        headers.authorization = `Bearer ${await this.#cfg.accessToken()}`;
+      }
+      if (body !== undefined) headers['content-type'] = 'application/json';
+      return httpRequest(href, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        timeoutMs: this.#cfg.httpTimeoutMs,
+        fetch: this.#cfg.fetch,
+      });
+    };
+    let res = await send();
+    // A resource server may demand a DPoP nonce (RFC 9449 §9): retry once with it.
+    if (this.#cfg.authorizationHeaders && wantsDpopNonce(res)) {
+      const nonce = res.headers.get('dpop-nonce');
+      await res.body?.cancel();
+      res = await send(nonce);
+    }
     try {
       return await readJson(res, SSFError);
     } catch (err) {
@@ -637,17 +606,6 @@ function mapJoseError(err) {
     return new SETValidationError(err.message, 'invalid_key', err);
   }
   return new SETValidationError(err.message ?? String(err), 'invalid_request', err);
-}
-
-async function readRawBody(req) {
-  if (typeof req.body === 'string') return req.body.trim();
-  if (Buffer.isBuffer(req.body)) return req.body.toString('utf8').trim();
-  let data = '';
-  for await (const chunk of req) {
-    data += chunk;
-    if (data.length > 1_000_000) throw new SETValidationError('SET too large', 'invalid_request');
-  }
-  return data.trim();
 }
 
 function assertFn(fn) {
