@@ -1,0 +1,24 @@
+{
+  "name": "oidc-caep-client",
+  "version": "0.1.0",
+  "description": "OpenID Connect relying-party client with token caching/auto-refresh and a Shared Signals (SSF) / CAEP event receiver",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": ["oidc", "openid", "oauth2", "caep", "ssf", "shared-signals", "risc", "secevent"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  }
+}

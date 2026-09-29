@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CAEP Demo</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◆</span>
+      <span>CAEP Demo</span>
+      <span class="tag">oidc-caep-client</span>
+    </div>
+    <div class="who" id="who"></div>
+  </header>
+
+  <div class="banner-area" id="banners" aria-live="polite"></div>
+
+  <main class="layout">
+    <div class="col">
+      <!-- Identity provider configuration -->
+      <section class="card" id="config-card">
+        <div class="card-head">
+          <h2>Identity provider</h2>
+          <span class="pill" id="config-pill">Not configured</span>
+        </div>
+
+        <div id="config-summary" hidden>
+          <dl class="kv" id="config-summary-kv"></dl>
+          <div class="actions">
+            <button class="btn ghost" id="btn-edit-config" type="button">Edit configuration</button>
+          </div>
+        </div>
+
+        <form id="config-form" novalidate>
+          <p class="muted small intro">Point this app at any OpenID Connect Core 1.0 provider. It configures itself from the provider's metadata document.</p>
+
+          <label for="discovery-url">Issuer or discovery URL</label>
+          <div class="inline">
+            <input id="discovery-url" type="url" placeholder="https://idp.example.com/.well-known/openid-configuration" autocomplete="url">
+            <button class="btn" id="btn-fetch" type="button">Fetch</button>
+          </div>
+          <p class="hint" id="fetch-result" aria-live="polite"></p>
+
+          <label for="metadata">OpenID Provider metadata document <span class="req">required</span></label>
+          <textarea id="metadata" rows="9" spellcheck="false" placeholder='Paste the JSON from /.well-known/openid-configuration, or fetch it above.'></textarea>
+          <p class="hint" id="metadata-summary"></p>
+
+          <div class="mode" role="radiogroup" aria-label="Client registration">
+            <label class="mode-opt"><input type="radio" name="reg-mode" value="static" checked> <span><strong>Use an existing client</strong><span class="muted small">Enter a client_id you already registered</span></span></label>
+            <label class="mode-opt" id="dcr-opt"><input type="radio" name="reg-mode" value="dynamic"> <span><strong>Register a new client</strong><span class="muted small" id="dcr-note">OpenID Connect Dynamic Client Registration</span></span></label>
+          </div>
+
+          <div id="static-fields" class="grid2">
+            <div>
+              <label for="client-id">client_id <span class="req">required</span></label>
+              <input id="client-id" autocomplete="off" spellcheck="false">
+            </div>
+            <div>
+              <label for="client-secret">client_secret <span class="muted">optional</span></label>
+              <input id="client-secret" type="password" autocomplete="new-password" spellcheck="false">
+              <label class="check small" id="clear-secret-row" hidden><input type="checkbox" id="clear-secret"> Remove stored secret</label>
+            </div>
+          </div>
+
+          <div id="dynamic-fields" class="grid2" hidden>
+            <div>
+              <label for="client-name">client_name</label>
+              <input id="client-name" placeholder="oidc-caep-client demo" spellcheck="false">
+            </div>
+            <div>
+              <label for="initial-token">Initial access token <span class="muted">if the IdP requires one</span></label>
+              <input id="initial-token" type="password" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="span2">
+              <label for="software-statement">Software statement <span class="muted">signed JWT the IdP trusts (RFC 7591 §2.3), if required</span></label>
+              <textarea id="software-statement" rows="3" spellcheck="false" placeholder="eyJhbGciOi…"></textarea>
+            </div>
+          </div>
+
+          <label for="id-token-alg">ID token signing alg</label>
+          <select id="id-token-alg"><option value="">Automatic (RS256)</option></select>
+          <p class="hint" id="alg-hint"></p>
+
+          <details class="advanced">
+            <summary>Advanced OIDC settings</summary>
+            <div class="grid2">
+              <div>
+                <label for="auth-method">Token endpoint auth method</label>
+                <select id="auth-method">
+                  <option value="">Automatic</option>
+                  <option value="client_secret_basic">client_secret_basic</option>
+                  <option value="client_secret_post">client_secret_post</option>
+                  <option value="none">none (public client + PKCE)</option>
+                </select>
+              </div>
+              <div>
+                <label for="scope">Scope</label>
+                <input id="scope" placeholder="openid profile email offline_access" spellcheck="false">
+              </div>
+            </div>
+          </details>
+
+          <fieldset class="caep">
+            <legend><label class="check"><input type="checkbox" id="caep-enabled" checked> Subscribe to CAEP events (Shared Signals)</label></legend>
+            <div class="grid2">
+              <div>
+                <label for="ssf-issuer">SSF transmitter issuer</label>
+                <input id="ssf-issuer" placeholder="Filled from the OIDC issuer" spellcheck="false">
+                <p class="hint" id="ssf-issuer-hint"></p>
+              </div>
+              <div>
+                <label for="ssf-delivery">Delivery method</label>
+                <select id="ssf-delivery">
+                  <option value="poll">Poll (RFC 8936)</option>
+                  <option value="push">Push (RFC 8935)</option>
+                </select>
+              </div>
+              <div>
+                <label for="ssf-auth">Management API credential</label>
+                <select id="ssf-auth">
+                  <option value="user">Signed-in user's access token</option>
+                  <option value="client_credentials">Client credentials grant</option>
+                  <option value="token">Static bearer token</option>
+                </select>
+              </div>
+              <div>
+                <label for="ssf-max-age">Max event age (seconds)</label>
+                <input id="ssf-max-age" type="number" min="0" step="60" value="3600">
+              </div>
+              <div>
+                <label for="ssf-subject">Subject format</label>
+                <select id="ssf-subject">
+                  <option value="iss_sub">iss_sub</option>
+                  <option value="email">email</option>
+                </select>
+              </div>
+            </div>
+            <label class="check"><input type="checkbox" id="ssf-only-users" checked> Only receive events about signed-in users (add them as stream subjects)</label>
+            <p class="hint">Off: nothing is added, and a transmitter with <code>default_subjects: ALL</code> sends events about every user.</p>
+            <p class="field-label">Events to request</p>
+            <div class="event-picks" id="ssf-events-pick"></div>
+            <p class="hint" id="ssf-auth-hint"></p>
+            <div id="ssf-scope-row">
+              <label for="ssf-scope">Client credentials scope</label>
+              <input id="ssf-scope" placeholder="e.g. ssf:read ssf:write" spellcheck="false">
+            </div>
+            <div id="ssf-token-row">
+              <label for="ssf-token">Management API bearer token</label>
+              <input id="ssf-token" type="password" autocomplete="off" spellcheck="false">
+            </div>
+            <p class="hint" id="push-warning" hidden>Push delivery needs the push endpoint below to be reachable from the transmitter. For a local app, use poll.</p>
+          </fieldset>
+
+          <div class="register">
+            <p class="small"><strong>Register these with your IdP</strong></p>
+            <dl class="kv" id="register-urls"></dl>
+          </div>
+
+          <p class="form-error" id="config-error" role="alert" hidden></p>
+          <div class="actions">
+            <button class="btn primary" id="btn-save" type="submit">Save &amp; connect</button>
+            <button class="btn ghost" id="btn-cancel" type="button" hidden>Cancel</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Signed-out hero -->
+      <section class="card hero" id="signed-out" hidden>
+        <p class="eyebrow">OpenID Connect + Shared Signals</p>
+        <h1>Continuous access, in real time.</h1>
+        <p class="muted">Sign in through your identity provider. The server caches your tokens, refreshes them before they expire, and listens for CAEP events that can change or end your session while you're using it.</p>
+        <a class="btn primary" href="/login">Sign in</a>
+      </section>
+
+      <!-- Signed-in session -->
+      <section class="card" id="session-card" hidden>
+        <div class="card-head">
+          <h2>Session</h2>
+          <span class="pill ok" id="session-pill">Active</span>
+        </div>
+        <dl class="claims" id="claims"></dl>
+      </section>
+
+      <section class="card" id="token-card" hidden>
+        <div class="card-head">
+          <h2>Token cache</h2>
+          <span class="muted small" id="refresh-count"></span>
+        </div>
+        <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-fill"></div><div class="meter-skew" id="meter-skew"></div></div>
+        <div class="token-row">
+          <div><div class="stat" id="expires-in">—</div><div class="muted small">access token expires in</div></div>
+          <div><div class="stat" id="refresh-in">—</div><div class="muted small">auto-refresh in</div></div>
+          <div><div class="stat" id="last-refresh">—</div><div class="muted small">last refresh</div></div>
+        </div>
+        <div class="actions">
+          <button class="btn" id="btn-userinfo">Call UserInfo</button>
+          <button class="btn ghost" id="btn-refresh">Force refresh</button>
+        </div>
+        <pre class="output" id="userinfo-out" hidden></pre>
+      </section>
+
+      <section class="card" id="tokens-card" hidden>
+        <div class="card-head">
+          <h2>Tokens</h2>
+          <div class="seg" role="tablist" aria-label="Which tokens">
+            <button type="button" role="tab" class="seg-btn on" data-which="signIn" aria-selected="true">At sign-in</button>
+            <button type="button" role="tab" class="seg-btn" data-which="current" aria-selected="false">Current</button>
+          </div>
+        </div>
+        <p class="muted small" id="tokens-note"></p>
+        <div id="tokens-body"></div>
+      </section>
+
+      <section class="card" id="stream-card">
+        <div class="card-head">
+          <h2>CAEP stream</h2>
+          <span class="pill" id="ssf-pill">…</span>
+        </div>
+        <dl class="kv" id="ssf-info"></dl>
+        <div class="chips" id="ssf-events"></div>
+        <p class="form-error" id="ssf-error" hidden></p>
+        <div class="actions">
+          <button class="btn ghost" id="btn-verify">Request verification event</button>
+          <button class="btn ghost" id="btn-reconnect">Reconnect stream</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="card log-card">
+      <div class="card-head">
+        <h2>Event log</h2>
+        <span class="live" id="live"><span class="dot"></span>live</span>
+      </div>
+      <ol class="log" id="log"></ol>
+      <p class="muted empty" id="log-empty">No CAEP events yet. Sign in, then trigger an event at your identity provider (for example, revoke the user's session).</p>
+    </section>
+  </main>
+
+  <template id="log-item">
+    <li class="log-item">
+      <div class="log-top">
+        <span class="evt"></span>
+        <time class="muted small"></time>
+      </div>
+      <p class="action"></p>
+      <details>
+        <summary class="muted small">Subject &amp; payload</summary>
+        <pre></pre>
+      </details>
+    </li>
+  </template>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

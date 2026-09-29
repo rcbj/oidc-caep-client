@@ -1,0 +1,16 @@
+{
+  "name": "oidc-caep-risc",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/oidc-caep-client",
+    "demo"
+  ],
+  "scripts": {
+    "test": "node --test packages/oidc-caep-client/test/*.test.js",
+    "start": "node demo/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
