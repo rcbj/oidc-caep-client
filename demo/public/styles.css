@@ -200,3 +200,10 @@ label.check { display: inline-flex; align-items: center; gap: 8px; font-weight: 
 .tok details { margin-top: 8px; }
 .tok details pre { color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; max-height: 320px; overflow: auto; }
 .tok .pill { font-size: 11px; padding: 1px 8px; }
+
+/* Security settings and the protections list */
+.security { border: 1px solid var(--border); border-radius: 12px; padding: 4px 14px 14px; margin: 18px 0 0; min-width: 0; }
+.security legend { padding: 0 6px; font-size: 13px; font-weight: 600; }
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 14px; }
+.checks li { padding-left: 22px; position: relative; overflow-wrap: anywhere; }
+.checks li::before { content: "✓"; position: absolute; left: 0; color: var(--ok); font-weight: 700; }
