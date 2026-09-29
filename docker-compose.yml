@@ -1,0 +1,19 @@
+services:
+  caep-demo:
+    build: .
+    image: oidc-caep-demo
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    environment:
+      # URL the browser uses to reach the app (basis for redirect_uri and the CAEP push endpoint).
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
+      # Optional: pre-configure the IdP. Otherwise configure it on the app's main screen.
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_SCOPE: ${OIDC_SCOPE:-}
+      SSF_TRANSMITTER_ISSUER: ${SSF_TRANSMITTER_ISSUER:-}
+      SSF_DELIVERY: ${SSF_DELIVERY:-}
+      SSF_SCOPE: ${SSF_SCOPE:-}
+      TOKEN_REFRESH_SKEW_SEC: ${TOKEN_REFRESH_SKEW_SEC:-60}
+    stop_grace_period: 5s
