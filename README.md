@@ -105,3 +105,7 @@ There are 36 tests. They run the library against an in-memory provider stub inje
 - **Code flow:** state, nonce, `iss` mix-up, PKCE, forged ID tokens, and error responses.
 - **Token refresh:** on-demand, background, coalesced/rotation-safe, and revoked grants.
 - **SSF:** stream lifecycle, all eight CAEP handlers, push authorization, bad signature, wrong or missing audience, wrong `typ`, too-old or future `iat`, replay, poll delivery with verification, and stream status.
+
+## License
+
+MIT © 2026 Iya CyberSecurity Solutions, LLC. See [LICENSE](LICENSE).

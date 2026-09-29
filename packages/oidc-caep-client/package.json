@@ -8,17 +8,29 @@
     ".": "./src/index.js"
   },
   "files": [
-    "src"
+    "src",
+    "LICENSE",
+    "README.md"
   ],
   "scripts": {
     "test": "node --test test/*.test.js"
   },
-  "keywords": ["oidc", "openid", "oauth2", "caep", "ssf", "shared-signals", "risc", "secevent"],
+  "keywords": [
+    "oidc",
+    "openid",
+    "oauth2",
+    "caep",
+    "ssf",
+    "shared-signals",
+    "risc",
+    "secevent"
+  ],
   "license": "MIT",
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
     "jose": "^6.2.12"
-  }
+  },
+  "author": "Iya CyberSecurity Solutions, LLC"
 }
