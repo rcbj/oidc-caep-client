@@ -42,6 +42,9 @@ Versions are `M.N.O`, with `O` the UTC build time, so `^0.1.0` takes every later
   - receiving CAEP events;
   - signing out, errors and troubleshooting.
 - **[API reference](reference.md):** the security features, every option, method and event, and the CAEP event table.
+- **Generated references**, from the source's JSDoc, for every exported class, function and type:
+  - **[TypeScript API](api/)** (TypeDoc), with the TypeScript signatures;
+  - **[JavaScript API](jsdoc/)** (JSDoc).
 - **[Running the demo](demo.md):** a complete app built this way, with several accounts per browser, a CAEP event log and an event-type picker, and how to register it on iya-sts.
 - **[Development and releases](development.md):** tests, CI, branches and versioning.
 

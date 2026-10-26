@@ -1,0 +1,14 @@
+{
+  // What TypeDoc reads: the library's JavaScript and its JSDoc types, as the declarations build does.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "skipLibCheck": true
+  },
+  "include": ["../../packages/oidc-caep-client/src/**/*.js"]
+}

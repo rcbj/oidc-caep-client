@@ -35,7 +35,7 @@ export class DPoPKey {
   publicJwk;
   /** @type {string} */
   alg;
-  /** @type {string} RFC 7638 SHA-256 thumbprint of the public key (the `jkt`). */
+  /** RFC 7638 SHA-256 thumbprint of the public key (the `jkt`). @type {string} */
   thumbprint;
 
   /**
