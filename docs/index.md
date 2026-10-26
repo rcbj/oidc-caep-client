@@ -29,6 +29,8 @@ That adds the package to your `package.json`:
 }
 ```
 
+It works from JavaScript and TypeScript: the package ships type declarations, so `import { SSFReceiver, type SecurityEvent } from 'oidc-caep-client'` is typed with no extra setup.
+
 Versions are `M.N.O`, with `O` the UTC build time, so `^0.1.0` takes every later 0.1 build; `npm install oidc-caep-client@next` gets the one built from `develop`. [Installing](reference.md#installing) in the reference covers pinning a version and loading the package with or without a bundler.
 
 ## Where to read
@@ -40,12 +42,15 @@ Versions are `M.N.O`, with `O` the UTC build time, so `^0.1.0` takes every later
   - receiving CAEP events;
   - signing out, errors and troubleshooting.
 - **[API reference](reference.md):** the security features, every option, method and event, and the CAEP event table.
-- **[The demo](https://github.com/rcbj/oidc-caep-client/tree/main/demo)**, a complete app built this way:
-  - several accounts in one browser;
-  - a CAEP event log;
-  - a picker for the event types its stream subscribes to.
+- **Generated references**, from the source's JSDoc, for every exported class, function and type:
+  - **[TypeScript API](api/)** (TypeDoc), with the TypeScript signatures;
+  - **[JavaScript API](jsdoc/)** (JSDoc).
+- **[Running the demo](demo.md):** a complete app built this way, with several accounts per browser, a CAEP event log and an event-type picker, and how to register it on iya-sts.
+- **[Development and releases](development.md):** tests, CI, branches and versioning.
 
 ## Quick look
+
+**JavaScript**
 
 ```js
 import { logEventReceived, OIDCClient, SSFReceiver, TokenManager } from 'oidc-caep-client';
@@ -90,6 +95,62 @@ caep
     if (evt.payload.current_level === 'HIGH') signOutLocally('Unusual activity was detected.');
   })
   .onError((err, ctx) => console.warn('CAEP', ctx.phase, err.message));
+
+await caep.start({ catchUp: true });
+```
+
+**TypeScript**
+
+The same app, typed. The package ships its declarations, so this needs no extra setup: set `"module": "NodeNext"` (or your bundler's resolution) in `tsconfig.json`.
+
+```ts
+import {
+  logEventReceived, OIDCClient, SSFReceiver, TokenManager,
+  type SecurityEvent, type SSFErrorContext, type TokenSet,
+} from 'oidc-caep-client';
+
+// Your app's own functions.
+declare function signOutLocally(reason: string): Promise<void>;
+declare function requireStepUp(): void;
+declare const audit: { record(name: string, subject: unknown): Promise<void> };
+
+const client: OIDCClient = await OIDCClient.discover({
+  issuer: 'https://idp.example.com',
+  clientId: 'my-spa',
+  redirectUri: `${location.origin}/callback`,
+  dpop: true,
+});
+const tokens = new TokenManager(client);
+
+// Sign in, then on /callback:
+const signedIn: TokenSet = await client.callback(location.href);
+await tokens.set('user', signedIn);
+
+const caep = new SSFReceiver({
+  transmitterIssuer: 'https://idp.example.com',
+  authorizationHeaders: async (req) => client.resourceHeaders(await tokens.getTokenSet('user'), req),
+  onEventReceived: async (evt: SecurityEvent) => {
+    logEventReceived(evt);
+    await audit.record(evt.name, evt.subject);
+  },
+});
+
+caep
+  .onSessionRevoked(() => signOutLocally('Your session was ended.'))
+  .onTokenClaimsChange(() => tokens.refresh('user'))
+  .onCredentialChange((evt: SecurityEvent) => {
+    if (['revoke', 'delete'].includes(evt.payload.change_type)) return signOutLocally('Sign in again.');
+  })
+  .onAssuranceLevelChange((evt: SecurityEvent) => {
+    if (evt.payload.change_direction === 'decrease') requireStepUp();
+  })
+  .onDeviceComplianceChange((evt: SecurityEvent) => {
+    if (evt.payload.current_status === 'not-compliant') return signOutLocally('This device no longer meets policy.');
+  })
+  .onRiskLevelChange((evt: SecurityEvent) => {
+    if (evt.payload.current_level === 'HIGH') return signOutLocally('Unusual activity was detected.');
+  })
+  .onError((err: Error & { code?: string }, ctx: SSFErrorContext) => console.warn('CAEP', ctx.phase, err.code, err.message));
 
 await caep.start({ catchUp: true });
 ```

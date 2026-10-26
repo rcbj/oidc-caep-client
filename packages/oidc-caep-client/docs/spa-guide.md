@@ -102,6 +102,8 @@ npm install oidc-caep-client
 
 That adds `"oidc-caep-client": "^0.1.0"` to the `dependencies` in your `package.json`, and installs its one dependency, [`jose`](https://github.com/panva/jose). Versions are `M.N.O`, with `O` the UTC build time, so `^0.1.0` takes every later 0.1 build. Pin one version instead for reproducible builds. `npm install oidc-caep-client@next` gets the latest build from `develop`, ahead of a release. The README's [Installing](../README.md#installing) section has the details.
 
+**TypeScript.** The package ships its own declarations, so a TypeScript app imports it the same way and gets the types, e.g. `type SecurityEvent` for an event handler's parameter. Set `"module": "NodeNext"` or your bundler's resolution so TypeScript reads the package's `exports`. The examples below are JavaScript; they compile as TypeScript unchanged.
+
 ### Load the library
 
 The library is plain ES modules. With a bundler, `import { OIDCClient } from 'oidc-caep-client'` just works. Without one, serve both packages from `node_modules` and add an import map, as the demo does:
@@ -232,6 +234,8 @@ Useful options on `createAuthorizationRequest()`:
 | `expectedSub` | Refuse a sign-in as anybody else (`account_mismatch`). |
 | `acrValues`, `maxAge` | Step-up: ask for a stronger or more recent authentication. With `enforceAcr` (the default), a returned `acr` outside `acrValues` is refused. |
 | `context` | Your own JSON data, handed back by `completeAuthorization()`. Use it, for example, to return to the page the person started from. |
+
+`extraParams` adds other parameters, such as `claims` or `ui_locales`. It can't replace the ones the client sets itself (`response_type`, `redirect_uri`, `state`, `nonce`, the PKCE and DPoP parameters, `resource`): those throw a `TypeError`.
 
 ## 7. Call your APIs
 
@@ -395,7 +399,8 @@ Every event (a signed SET) is refused unless all of these hold:
 The receiver is careful about what it tells the transmitter, because an acknowledged event, or one reported as an error, is never sent again:
 
 - **An invalid event** goes to `onError`, is reported back to the transmitter on the next poll, and never reaches your handlers.
-- **An event that couldn't be checked** for a reason that may pass (a network error fetching the keys, a key the cached set doesn't hold yet) is left for the transmitter to send again.
+- **An event that couldn't be checked** for a reason that may pass (a network error fetching the keys, a key the cached set doesn't hold yet) is left for the transmitter to send again, for as long as that lasts.
+- **Polls never overlap,** so an event still being handled is never acknowledged by another poll.
 - **An event is acknowledged only after your handlers succeed.** If one throws, the event comes back on a later poll, up to `maxDeliveryAttempts` times (default 5). Write handlers so that running twice is harmless; a reload can also bring an event back.
 - **The poll URL** must use https and be at the transmitter's origin, because every poll carries the person's access token.
 

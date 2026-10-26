@@ -15,7 +15,11 @@ const PROFILE_CLAIMS = ['iss', 'sub', 'sid', 'name', 'given_name', 'family_name'
  */
 export const INTERACTION_REQUIRED = Object.freeze(['login_required', 'interaction_required', 'account_selection_required', 'consent_required']);
 
-/** True when `err` is an OAuthError that a request showing the sign-in screen (no `prompt=none`) would get past. */
+/**
+ * True when `err` is an OAuthError that a request showing the sign-in screen (no `prompt=none`) would get past.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
 export function needsInteraction(err) {
   return err instanceof OAuthError && INTERACTION_REQUIRED.includes(err.error);
 }
@@ -45,7 +49,7 @@ export function needsInteraction(err) {
  * @param {Account} account
  * @param {{ getTokenSet: (opts?: { forceRefresh?: boolean }) => Promise<import('./token-set.js').TokenSet> }} access
  *        Reaches this account's tokens during the hook (and, for `onActivate`, for as long as it stays active).
- * @returns {void|Promise<void>}
+ * @returns {unknown} Anything; a promise is awaited.
  */
 
 /**
@@ -106,6 +110,8 @@ export class AccountManager extends Emitter {
   #accounts = new Map();
   #active;
   #activating;
+  /** The change to the shared list this tab is making, if any (see #load). */
+  #mutating;
   #channel;
 
   /**
@@ -171,7 +177,7 @@ export class AccountManager extends Emitter {
     return [...this.#accounts.values()].sort((a, b) => a.addedAt - b.addedAt).map((a) => ({ ...a }));
   }
 
-  /** @returns {Account|undefined} */
+  /** @param {string} key @returns {Account|undefined} */
   get(key) {
     const a = this.#accounts.get(key);
     return a && { ...a };
@@ -182,6 +188,11 @@ export class AccountManager extends Emitter {
   get activeKey() { return this.#active; }
 
   /** The identity `subjectMatches()` compares a security event's subject with. */
+  /**
+   * @param {string} key
+   * @returns {{ iss: string, sub: string, sid?: string, email?: string, email_verified?: boolean,
+   *   phone_number?: string, phone_number_verified?: boolean }|undefined}
+   */
   identity(key) {
     const a = this.#accounts.get(key);
     return a && { iss: a.iss, sub: a.sub, sid: a.sid, email: a.email, email_verified: a.email_verified,
@@ -206,12 +217,16 @@ export class AccountManager extends Emitter {
    * The active account's tokens, refreshed first when (nearly) expired. A dormant account's tokens cannot
    * be reached: activate the account first.
    * @param {{ forceRefresh?: boolean }} [opts]
+   * @returns {Promise<import('./token-set.js').TokenSet>}
    */
   getTokenSet(opts) {
     return this.#tokensFor(this.#active, opts);
   }
 
-  /** Refreshes the active account's tokens now. */
+  /**
+   * Refreshes the active account's tokens now.
+   * @returns {Promise<import('./token-set.js').TokenSet>}
+   */
   refresh() {
     return this.#tokensFor(this.#active, { forceRefresh: true });
   }
@@ -234,17 +249,26 @@ export class AccountManager extends Emitter {
    * A sign-in that leaves the choice to the OP: with several accounts signed in there, it shows its
    * account picker; with one, it answers as that account.
    * @param {Parameters<import('./oidc-client.js').OIDCClient['createAuthorizationRequest']>[0]} [opts]
+   * @returns {Promise<{ url: string, state: string }>}
    */
   signIn(opts = {}) {
     return this.#client.createAuthorizationRequest({ ...opts, context: { intent: 'sign-in' } });
   }
 
-  /** A sign-in that always shows the OP's account picker (`prompt=select_account`). */
+  /**
+   * A sign-in that always shows the OP's account picker (`prompt=select_account`).
+   * @param {Parameters<import('./oidc-client.js').OIDCClient['createAuthorizationRequest']>[0]} [opts]
+   * @returns {Promise<{ url: string, state: string }>}
+   */
   chooseAccount(opts = {}) {
     return this.#client.createAuthorizationRequest({ ...opts, prompt: 'select_account', context: { intent: 'choose' } });
   }
 
-  /** A fresh sign-in (`prompt=login`), never the OP's picker: whoever signs in is added as an account. */
+  /**
+   * A fresh sign-in (`prompt=login`), never the OP's picker: whoever signs in is added as an account.
+   * @param {Parameters<import('./oidc-client.js').OIDCClient['createAuthorizationRequest']>[0]} [opts]
+   * @returns {Promise<{ url: string, state: string }>}
+   */
   addAccount(opts = {}) {
     return this.#client.createAuthorizationRequest({ ...opts, prompt: 'login', context: { intent: 'add' } });
   }
@@ -254,6 +278,8 @@ export class AccountManager extends Emitter {
    * account with `login_hint` and, where cached, `id_token_hint`). Answers with an OAuthError for which
    * `needsInteraction()` is true when the account's session at the OP has ended; `reauthenticate()` then.
    * @param {string} key
+   * @param {Parameters<import('./oidc-client.js').OIDCClient['createAuthorizationRequest']>[0]} [opts]
+   * @returns {Promise<{ url: string, state: string }>}
    */
   resume(key, opts = {}) {
     return this.#accountRequest(key, 'resume', { prompt: 'none', ...opts });
@@ -263,6 +289,8 @@ export class AccountManager extends Emitter {
    * Signs this account's person in again at the OP (`prompt=login` by default), e.g. for step-up with
    * `acrValues`/`maxAge`. A sign-in as anybody else is refused at the callback (`account_mismatch`).
    * @param {string} key
+   * @param {Parameters<import('./oidc-client.js').OIDCClient['createAuthorizationRequest']>[0]} [opts]
+   * @returns {Promise<{ url: string, state: string }>}
    */
   reauthenticate(key, opts = {}) {
     return this.#accountRequest(key, 'reauth', { prompt: 'login', ...opts });
@@ -459,7 +487,11 @@ export class AccountManager extends Emitter {
     return this.get(key);
   }
 
-  /** Removes an account that is not signed in from the list. A signed-in account must be signed out first. */
+  /**
+   * Removes an account that is not signed in from the list. A signed-in account must be signed out first.
+   * @param {string} key
+   * @returns {Promise<void>}
+   */
   async forget(key) {
     let removed;
     await this.#mutate(() => {
@@ -573,23 +605,45 @@ export class AccountManager extends Emitter {
     this.emit('change');
   }
 
+  /**
+   * Re-reads the shared list. A change in progress in this tab (#mutate) is waited for first: replacing
+   * the list under it would lose what it is adding, and its write would then persist the stale list,
+   * orphaning the tokens it stored. Never call this from inside a #mutate callback.
+   */
   async #load() {
+    while (this.#mutating) await this.#mutating.catch(() => {});
+    await this.#read();
+  }
+
+  async #read() {
     const saved = await this.#store.get(this.#storeKey);
     this.#accounts = new Map((saved?.accounts ?? []).map((a) => [a.key, a]));
   }
 
   /** Read-modify-write of the shared list, under a lock shared by the tabs; then tells the other tabs. */
   async #mutate(fn) {
-    await withLock(`oidc-caep-client:${this.#storeKey}`, async () => {
-      await this.#load();
+    while (this.#mutating) await this.#mutating.catch(() => {});
+    const run = withLock(`oidc-caep-client:${this.#storeKey}`, async () => {
+      await this.#read();
       await fn();
       await this.#store.set(this.#storeKey, { accounts: [...this.#accounts.values()] });
     });
+    this.#mutating = run;
+    try {
+      await run;
+    } finally {
+      if (this.#mutating === run) this.#mutating = undefined;
+    }
     this.#channel?.postMessage({ type: 'change' });
   }
 }
 
-/** The account key for an `iss` and `sub`: stable, opaque, and safe in a storage key or a URL. */
+/**
+ * The account key for an `iss` and `sub`: stable, opaque, and safe in a storage key or a URL.
+ * @param {string} iss
+ * @param {string} sub
+ * @returns {Promise<string>}
+ */
 export async function accountKey(iss, sub) {
   return `acct-${base64url(await digest(`${iss}\n${sub}`)).slice(0, 22)}`;
 }

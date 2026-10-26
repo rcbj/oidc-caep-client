@@ -14,6 +14,10 @@ import { base64url, digest, Emitter, isSecureUrl, timingSafeEqual } from './util
  * JWT `typ` values that mark a token as something other than an ID token. Presenting one of them as an
  * ID token is token confusion (RFC 8725 §3.11), so it is refused even when its signature verifies.
  */
+/** Authorization request parameters `extraParams` may not set: the client sets them, and the callback relies on them. */
+const RESERVED_AUTHORIZATION_PARAMS = Object.freeze(['response_type', 'response_mode', 'client_id', 'redirect_uri', 'state',
+  'nonce', 'code_challenge', 'code_challenge_method', 'dpop_jkt', 'request', 'request_uri', 'resource']);
+
 const NOT_ID_TOKEN_TYPES = ['at+jwt', 'application/at+jwt', 'logout+jwt', 'secevent+jwt', 'dpop+jwt',
   'token-introspection+jwt', 'software-statement+jwt', 'jwt-bearer'];
 
@@ -35,7 +39,7 @@ const ENDPOINTS = ['issuer', 'authorization_endpoint', 'token_endpoint', 'jwks_u
  * @property {string|string[]} [resource]       RFC 8707 resource indicator(s): audience-restricts the tokens.
  * @property {string} [idTokenSignedResponseAlg] Expected ID token `alg` (default RS256).
  * @property {'auto'|'always'|'never'} [par]    Pushed Authorization Requests (RFC 9126). Default "auto": used when advertised.
- * @property {boolean|{ key?: DPoPKey, keyStore?: object, alg?: string }} [dpop]
+ * @property {boolean|{ key?: DPoPKey, keyStore?: import('./dpop.js').KeyStore, alg?: string }} [dpop]
  *           DPoP (RFC 9449). `true` generates a non-extractable key kept in memory; pass `keyStore`
  *           (e.g. `new IndexedDBKeyStore()`) to keep it across page loads.
  * @property {string} [userinfoSignedResponseAlg] The only `alg` a signed UserInfo response may use. Default: any asymmetric algorithm.
@@ -68,7 +72,10 @@ export class OIDCClient extends Emitter {
   dpopKey;
   #jwks;
   #config;
-  #nonces = new DPoPNonceCache();
+  // RFC 9449 §8 and §9: the authorization server's nonce and a resource server's are separate, even when
+  // both are on one origin (UserInfo at the OP), so each has its own cache.
+  #asNonces = new DPoPNonceCache();
+  #rsNonces = new DPoPNonceCache();
   #usedStates = new Map();
   #usePar = false;
 
@@ -100,14 +107,23 @@ export class OIDCClient extends Emitter {
     this.#config.transactionStore ??= new TransactionStore();
   }
 
-  /** Creates a client and loads the provider's discovery document. */
+  /**
+   * Creates a client and loads the provider's discovery document.
+   * @param {OIDCClientConfig} config
+   * @returns {Promise<OIDCClient>}
+   */
   static async discover(config) {
     const client = new OIDCClient(config);
     await client.init();
     return client;
   }
 
-  /** Creates a client from an already-obtained OpenID Provider metadata document (validated as if discovered). */
+  /**
+   * Creates a client from an already-obtained OpenID Provider metadata document (validated as if discovered).
+   * @param {Record<string, any>} metadata
+   * @param {Omit<OIDCClientConfig, 'metadata'>} config
+   * @returns {Promise<OIDCClient>}
+   */
   static async fromMetadata(metadata, config) {
     return OIDCClient.discover({ ...config, metadata });
   }
@@ -115,6 +131,10 @@ export class OIDCClient extends Emitter {
   /**
    * Registers a new PUBLIC client (OpenID Connect Dynamic Client Registration 1.0) and returns a client
    * configured from the registration. `token_endpoint_auth_method` is always "none".
+   * @param {Record<string, any>} providerMetadata
+   * @param {Record<string, any>} clientMetadata  RFC 7591 metadata, e.g. `{ redirect_uris, id_token_signed_response_alg }`
+   * @param {Omit<OIDCClientConfig, 'clientId' | 'metadata'> & { initialAccessToken?: string }} [config]
+   * @returns {Promise<{ client: OIDCClient, registration: import('./registration.js').ClientRegistration }>}
    */
   static async register(providerMetadata, clientMetadata, { initialAccessToken, ...config } = {}) {
     validateOpenIdProviderMetadata(providerMetadata);
@@ -264,6 +284,13 @@ export class OIDCClient extends Emitter {
     if (!redirectUri) throw new TypeError('redirectUri is required');
     if (!c.allowInsecureRequests && !isSecureUrl(redirectUri)) throw new ValidationError(`redirectUri must use https (or loopback http): ${redirectUri}`, { code: 'insecure_redirect_uri' });
 
+    // extraParams adds parameters (e.g. `claims`, `ui_locales`); it may not replace the ones this method
+    // sets for PKCE, state, nonce, the redirect URI, DPoP binding or the response type.
+    const reserved = Object.keys(opts.extraParams ?? {}).filter((k) => RESERVED_AUTHORIZATION_PARAMS.includes(k));
+    if (reserved.length) {
+      throw new TypeError(`extraParams may not set ${reserved.join(', ')}: the client sets them itself`);
+    }
+
     const state = randomToken();
     const nonce = randomToken();
     const codeVerifier = generateCodeVerifier();
@@ -281,8 +308,8 @@ export class OIDCClient extends Emitter {
       login_hint: opts.loginHint,
       id_token_hint: opts.idTokenHint,
       acr_values: opts.acrValues,
-      dpop_jkt: this.dpopKey?.thumbprint,
       ...opts.extraParams,
+      dpop_jkt: this.dpopKey?.thumbprint,
     };
     // offline_access requires prompt=consent per OIDC Core §11 unless the caller chose otherwise.
     if (params.scope.split(' ').includes('offline_access') && params.prompt === undefined) params.prompt = 'consent';
@@ -482,6 +509,7 @@ export class OIDCClient extends Emitter {
    *
    * @param {TokenSet|{access_token: string, token_type?: string}|string} token
    * @param {{ method?: string, url: string, nonce?: string }} request
+   * @returns {Promise<Record<string, string>>} `authorization`, and `dpop` for a DPoP-bound token
    */
   async resourceHeaders(token, { method = 'GET', url, nonce }) {
     const { access_token: accessToken, token_type: type } = typeof token === 'string' ? { access_token: token, token_type: 'Bearer' } : token;
@@ -489,7 +517,7 @@ export class OIDCClient extends Emitter {
       if (!this.dpopKey) throw new OIDCClientError('A DPoP-bound token needs the DPoP key it was issued to', { code: 'dpop_key_missing' });
       return {
         authorization: `DPoP ${accessToken}`,
-        dpop: await this.dpopKey.proof({ method, url, accessToken, nonce: nonce ?? this.#nonces.get(url) }),
+        dpop: await this.dpopKey.proof({ method, url, accessToken, nonce: nonce ?? this.#rsNonces.get(url) }),
       };
     }
     return { authorization: `Bearer ${accessToken}` };
@@ -511,11 +539,11 @@ export class OIDCClient extends Emitter {
       headers: { ...init.headers, ...(await this.resourceHeaders(token, { method, url, nonce })) },
     });
     let res = await send();
-    const nonce = this.#nonces.update(url, res);
+    const nonce = this.#rsNonces.update(url, res);
     if (wantsDpopNonce(res)) {
       await res.body?.cancel();
       res = await send(nonce);
-      this.#nonces.update(url, res);
+      this.#rsNonces.update(url, res);
     }
     return res;
   }
@@ -725,17 +753,17 @@ export class OIDCClient extends Emitter {
     form.set('client_id', this.#config.clientId);
     const send = async (nonce) => {
       const headers = { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' };
-      if (this.dpopKey) headers.dpop = await this.dpopKey.proof({ method: 'POST', url: endpoint, nonce: nonce ?? this.#nonces.get(endpoint) });
+      if (this.dpopKey) headers.dpop = await this.dpopKey.proof({ method: 'POST', url: endpoint, nonce: nonce ?? this.#asNonces.get(endpoint) });
       return httpRequest(endpoint, { ...this.#httpOpts(), method: 'POST', headers, body: form });
     };
     let res = await send();
-    let nonce = this.#nonces.update(endpoint, res);
+    let nonce = this.#asNonces.update(endpoint, res);
     if (this.dpopKey && res.status === 400 && nonce) {
       const text = await res.clone().text();
       if (/"error"\s*:\s*"use_dpop_nonce"/.test(text)) {
         await res.body?.cancel();
         res = await send(nonce);
-        nonce = this.#nonces.update(endpoint, res);
+        nonce = this.#asNonces.update(endpoint, res);
       }
     }
     return readJson(res);

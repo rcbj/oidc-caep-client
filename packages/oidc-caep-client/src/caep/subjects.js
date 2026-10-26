@@ -29,7 +29,7 @@ const COMPLEX_MEMBERS = ['user', 'session', 'device', 'application', 'tenant', '
  * - In a complex subject every member must match, and the members this identity can't be checked
  *   against count as a non-match: an event about one session matches only an identity holding that `sid`.
  *
- * @param {object} subId
+ * @param {Record<string, any>} subId  An RFC 9493 subject identifier, e.g. a SET's `sub_id`
  * @param {Record<string, any>} identity
  * @returns {boolean}
  */
