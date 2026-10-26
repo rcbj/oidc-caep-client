@@ -169,6 +169,20 @@ Delivery is **poll** (RFC 8936). If you prefer a static bearer token, pass `acce
 | SSF verification | `onVerification` | `verification` | `state` |
 | SSF stream-updated | `onStreamUpdated` | `streamUpdated` | `status`, `reason` |
 
+**Your own logic for every event.** `onEventReceived` in the receiver's options is called once for each accepted event, before the typed handlers below, and is awaited. By default it is `logEventReceived`, which prints `[oidc-caep-client] CAEP event received: <name> (jti …)` and the event to the console. Replace it with your own function, call `logEventReceived` from yours to keep the line, or pass `null` to turn it off. If it throws, `onError` gets the error with `phase: 'hook'`, and the typed handlers still run.
+
+```js
+import { logEventReceived, SSFReceiver } from 'oidc-caep-client';
+
+const caep = new SSFReceiver({
+  transmitterIssuer: 'https://idp.example.com',
+  onEventReceived: async (evt) => {
+    logEventReceived(evt);
+    await audit.record(evt.name, evt.subject, evt.payload); // your logic
+  },
+});
+```
+
 The receiver also has these generic hooks:
 
 - `onEvent(uri, fn)` handles any event type, for example the RISC events in `RISC.*`.
