@@ -21,6 +21,19 @@
  *     --public-url http://localhost:3000
  *
  * Running it again adds the same values to the existing application.
+ *
+ * The scopes are gated by role in iya-sts. A person is issued ssf.read only
+ * while they are in the group ssf-read AND the application is a member of
+ * the native role SSF_READ; ssf.manage the same way through ssf-manage and
+ * SSF_MANAGE, which does not authorize ssf.read. So the script also:
+ *
+ *   - adds the application to SSF_READ and SSF_MANAGE as an application
+ *     member (roles/add-member, kind application), for whichever of
+ *     ssf.read and ssf.manage the configuration file's scopes name;
+ *   - creates a test user (default caep-demo-user) when it is absent, and
+ *     adds it to the groups ssf-read and ssf-manage. Its password is
+ *     CAEP_DEMO_USER_PASSWORD, or one is generated and printed once. An
+ *     existing user keeps its password.
  */
 
 import { readFileSync } from 'node:fs';
@@ -31,13 +44,23 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
 
+const SSF_ROLES = [
+  { scope: 'ssf.read', role: 'SSF_READ', group: 'ssf-read' },
+  { scope: 'ssf.manage', role: 'SSF_MANAGE', group: 'ssf-manage' },
+];
+
 function usage() {
   return `Usage: node scripts/register-iya-sts-client.mjs [--config path] [--public-url url]
+                                                [--test-user name | --no-test-user]
 
   --config       OIDC file with metadataUrl, client_id, and scopes
                  (default: demo/public/oidc.json)
   --public-url   Where the demo is served. The redirect URI is
                  <public-url>/callback (default: $PUBLIC_URL or http://localhost:3000)
+  --test-user    The test user to create and add to ssf-read and ssf-manage
+                 (default: caep-demo-user). Its password is $CAEP_DEMO_USER_PASSWORD,
+                 or one is generated and printed once.
+  --no-test-user Do not create or change a test user.
 
 The management API secret is STS_ADMIN_API_CLIENT_SECRET or ADMIN_API_CLIENT_SECRET.`;
 }
@@ -46,6 +69,7 @@ function parseArgs(argv) {
   const out = {
     config: resolve(repoRoot, 'demo/public/oidc.json'),
     publicUrl: (process.env.PUBLIC_URL || 'http://localhost:3000').replace(/\/+$/, ''),
+    testUser: 'caep-demo-user',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -55,6 +79,8 @@ function parseArgs(argv) {
     }
     if (arg === '--config') out.config = resolve(argv[++i] ?? '');
     else if (arg === '--public-url') out.publicUrl = String(argv[++i] ?? '').replace(/\/+$/, '');
+    else if (arg === '--test-user') out.testUser = String(argv[++i] ?? '').trim();
+    else if (arg === '--no-test-user') out.testUser = '';
     else throw new Error(`Unknown argument ${arg}\n${usage()}`);
   }
   if (!out.publicUrl) throw new Error('--public-url is empty');
@@ -193,6 +219,43 @@ async function ensure(base, token, spec) {
   }
 }
 
+// Makes the application a member of each SSF role whose scope the file asks for. The answer for
+// an application that already holds the role is a 400 saying so, which is the state wanted.
+async function grantSsfRoles(base, token, clientId, scopes) {
+  for (const { scope, role } of SSF_ROLES.filter((r) => scopes.includes(r.scope))) {
+    const added = await admin(base, token, 'POST', '/roles/add-member', { role, kind: 'application', member: clientId });
+    const already = [].concat(added.body.errors ?? []).some((one) => /already holds/i.test(String(one)));
+    if (!added.body.ok && !already) {
+      throw new Error(`adding ${clientId} to ${role} was refused: ${JSON.stringify(added.body).slice(0, 300)}`);
+    }
+    console.log(`${clientId} ${already ? 'already holds' : 'now holds'} ${role}, so it may be issued ${scope}.`);
+  }
+}
+
+// Creates the test user when absent (an existing one keeps its password) and puts it in each SSF
+// group whose scope the file asks for. A group that already lists it answers ok, changed: false.
+async function ensureTestUser(base, token, username, scopes) {
+  const found = await admin(base, token, 'GET', `/users?user=${encodeURIComponent(username)}`);
+  if (found.body.known === true) {
+    console.log(`User ${username} already exists; its password is unchanged.`);
+  } else {
+    const password = process.env.CAEP_DEMO_USER_PASSWORD || '';
+    const body = password
+      ? { username, invent: false, credential: 'password', password, passwordConfirm: password }
+      : { username, invent: false, credential: 'generate' };
+    const created = await admin(base, token, 'POST', '/users/create', body);
+    if (!created.body.ok) throw new Error(`creating ${username} was refused: ${JSON.stringify(created.body).slice(0, 300)}`);
+    console.log(`Created user ${username}.`);
+    if (created.body.password) console.log(`Generated password for ${username} (shown once): ${created.body.password}`);
+    if (created.body.credentialError) console.warn(`WARNING: the password was not set: ${created.body.credentialError}`);
+  }
+  for (const { group } of SSF_ROLES.filter((r) => scopes.includes(r.scope))) {
+    const added = await admin(base, token, 'POST', '/groups/add-member', { group, member: username });
+    if (!added.body.ok) throw new Error(`adding ${username} to ${group} was refused: ${JSON.stringify(added.body).slice(0, 300)}`);
+    console.log(`${username} ${added.body.changed === false ? 'was already' : 'is now'} in ${group}.`);
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const oidc = readOidcFile(args.config);
@@ -219,6 +282,8 @@ async function main() {
       appCorsOrigin: [publicUrl.origin],
     },
   });
+  await grantSsfRoles(oidc.base, token, oidc.clientId, oidc.scopes);
+  if (args.testUser) await ensureTestUser(oidc.base, token, args.testUser, oidc.scopes);
   const view = await admin(oidc.base, token, 'GET', `/applications?application=${encodeURIComponent(oidc.clientId)}`);
   const entry = view.body.application ?? view.body;
   const fields = entry.fields ?? entry;
