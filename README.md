@@ -1,6 +1,6 @@
 # oidc-caep-client
 
-An OpenID Connect client for browser single-page apps, and a demo app built on it. The client runs in the page as a public client (PKCE, PAR, DPoP) and receives CAEP security events through the Shared Signals Framework.
+An OpenID Connect client for browser single-page apps, written in JavaScript with TypeScript declarations, and a demo app built on it. The client runs in the page as a public client (PKCE, PAR, DPoP) and receives CAEP security events through the Shared Signals Framework.
 
 **Documentation:** <https://rcbj.github.io/oidc-caep-client/>
 

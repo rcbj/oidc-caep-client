@@ -35,7 +35,7 @@ const ENDPOINTS = ['issuer', 'authorization_endpoint', 'token_endpoint', 'jwks_u
  * @property {string|string[]} [resource]       RFC 8707 resource indicator(s): audience-restricts the tokens.
  * @property {string} [idTokenSignedResponseAlg] Expected ID token `alg` (default RS256).
  * @property {'auto'|'always'|'never'} [par]    Pushed Authorization Requests (RFC 9126). Default "auto": used when advertised.
- * @property {boolean|{ key?: DPoPKey, keyStore?: object, alg?: string }} [dpop]
+ * @property {boolean|{ key?: DPoPKey, keyStore?: import('./dpop.js').KeyStore, alg?: string }} [dpop]
  *           DPoP (RFC 9449). `true` generates a non-extractable key kept in memory; pass `keyStore`
  *           (e.g. `new IndexedDBKeyStore()`) to keep it across page loads.
  * @property {string} [userinfoSignedResponseAlg] The only `alg` a signed UserInfo response may use. Default: any asymmetric algorithm.
@@ -100,14 +100,23 @@ export class OIDCClient extends Emitter {
     this.#config.transactionStore ??= new TransactionStore();
   }
 
-  /** Creates a client and loads the provider's discovery document. */
+  /**
+   * Creates a client and loads the provider's discovery document.
+   * @param {OIDCClientConfig} config
+   * @returns {Promise<OIDCClient>}
+   */
   static async discover(config) {
     const client = new OIDCClient(config);
     await client.init();
     return client;
   }
 
-  /** Creates a client from an already-obtained OpenID Provider metadata document (validated as if discovered). */
+  /**
+   * Creates a client from an already-obtained OpenID Provider metadata document (validated as if discovered).
+   * @param {Record<string, any>} metadata
+   * @param {Omit<OIDCClientConfig, 'metadata'>} config
+   * @returns {Promise<OIDCClient>}
+   */
   static async fromMetadata(metadata, config) {
     return OIDCClient.discover({ ...config, metadata });
   }
@@ -115,6 +124,10 @@ export class OIDCClient extends Emitter {
   /**
    * Registers a new PUBLIC client (OpenID Connect Dynamic Client Registration 1.0) and returns a client
    * configured from the registration. `token_endpoint_auth_method` is always "none".
+   * @param {Record<string, any>} providerMetadata
+   * @param {Record<string, any>} clientMetadata  RFC 7591 metadata, e.g. `{ redirect_uris, id_token_signed_response_alg }`
+   * @param {Omit<OIDCClientConfig, 'clientId' | 'metadata'> & { initialAccessToken?: string }} [config]
+   * @returns {Promise<{ client: OIDCClient, registration: import('./registration.js').ClientRegistration }>}
    */
   static async register(providerMetadata, clientMetadata, { initialAccessToken, ...config } = {}) {
     validateOpenIdProviderMetadata(providerMetadata);
@@ -482,6 +495,7 @@ export class OIDCClient extends Emitter {
    *
    * @param {TokenSet|{access_token: string, token_type?: string}|string} token
    * @param {{ method?: string, url: string, nonce?: string }} request
+   * @returns {Promise<Record<string, string>>} `authorization`, and `dpop` for a DPoP-bound token
    */
   async resourceHeaders(token, { method = 'GET', url, nonce }) {
     const { access_token: accessToken, token_type: type } = typeof token === 'string' ? { access_token: token, token_type: 'Bearer' } : token;

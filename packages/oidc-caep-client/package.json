@@ -13,18 +13,26 @@
   },
   "type": "module",
   "main": "./src/index.js",
+  "types": "./types/index.d.ts",
   "exports": {
-    ".": "./src/index.js"
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    }
   },
   "sideEffects": false,
   "files": [
     "src",
+    "types",
     "docs",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "build:types": "tsc -p tsconfig.json",
+    "test:types": "tsc -p test/types/tsconfig.json",
+    "prepack": "npm run build:types"
   },
   "keywords": [
     "browser",
@@ -52,5 +60,8 @@
   "publishConfig": {
     "access": "public",
     "provenance": true
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
   }
 }

@@ -5,7 +5,8 @@
 # what a browser needs.
 #
 #   test    `npm test` (node:test against the strict in-memory OP and SSF transmitter in
-#           packages/oidc-caep-client/test) on the Node version package.json's engines require (24.22.1),
+#           packages/oidc-caep-client/test), `npm run test:types` (the generated TypeScript
+#           declarations, used from TypeScript and from type-checked JavaScript) on the Node version package.json's engines require (24.22.1),
 #           and the check that the committed package.json versions follow VERSION.
 #   demo    builds the image from the repo-root Dockerfile, starts it, waits for its health check,
 #           and requests the pages and modules the SPA loads. It also checks the security headers
@@ -55,6 +56,11 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # Builds the .d.ts files from the JSDoc, then type-checks a TypeScript consumer and a
+      # // @ts-check JavaScript consumer against them, through package.json's "exports".
+      - name: Type-check the TypeScript declarations
+        run: npm run test:types
 
       - name: Check the manifests follow VERSION
         run: node scripts/version.mjs --check-manifests

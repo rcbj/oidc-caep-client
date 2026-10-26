@@ -1,0 +1,17 @@
+{
+  // Type-checks two consumers of the published package, resolved through package.json's "exports" the way
+  // an app would: consumer.ts (TypeScript) and consumer.js (JavaScript with // @ts-check). Nothing is emitted.
+  // Run with `npm run test:types` after `npm run build:types`.
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "allowJs": true,
+    "checkJs": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "skipLibCheck": false
+  },
+  "files": ["consumer.ts", "consumer.js"]
+}
