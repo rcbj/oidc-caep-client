@@ -546,7 +546,8 @@ export class SSFReceiver {
         { code: 'handler_failed' }), { phase: 'handler', jti });
     }
     this.#attempts.delete(jti);
-    this.#pendingAcks.push(jti);
+    // Once: two overlapping polls (a pollNow() beside the loop) can both receive a SET before either acks it.
+    if (!this.#pendingAcks.includes(jti)) this.#pendingAcks.push(jti);
   }
 
   /** Counts one more attempt at a SET, returning the count. Bounded like the jti cache. */

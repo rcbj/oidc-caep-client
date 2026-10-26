@@ -952,6 +952,8 @@ describe('SSF / CAEP receiver (poll)', () => {
   });
 
   // --- the 2026-10-26 security review --------------------------------------------------------------
+  // start() polls once in the background; with a long interval, that is the only background poll.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
   const signSet = (s, claims, header = {}) => new SignJWT({ jti: randomUUID(), ...claims })
     .setProtectedHeader({ alg: 'RS256', kid: 'k1', typ: 'secevent+jwt', ...header })
     .setIssuer(op.issuer).setAudience(s.aud).sign(op.privateKey);
@@ -962,6 +964,7 @@ describe('SSF / CAEP receiver (poll)', () => {
     const r = await receiver({ pollIntervalMs: 60_000 });
     r.onSessionRevoked((e) => got.push(e.jti));
     await r.start();
+    await settle(); // the poll start() kicks off, before this test drives poll() itself
     const s = stream(r);
     const old = await signSet(s, { iat: Math.floor(Date.now() / 1000) - 2 * 3600, sub_id: alice(), events: { [CAEP.SESSION_REVOKED]: {} } });
     const future = await signSet(s, { iat: Math.floor(Date.now() / 1000) + 3600, sub_id: alice(), events: { [CAEP.SESSION_REVOKED]: {} } });
@@ -970,6 +973,7 @@ describe('SSF / CAEP receiver (poll)', () => {
     await r.poll();
     assert.equal(got.length, 1, 'the two-hour-old session-revoked is handled');
     await r.poll();
+    assert.ok(!s.queue.has('old'), 'acknowledged');
     assert.deepEqual(op.state.lastPoll.ack, ['old']);
     assert.match(s.errs.future.description, /future/);
     await r.stop();
@@ -986,6 +990,7 @@ describe('SSF / CAEP receiver (poll)', () => {
     const r = await receiver({ fetch, pollIntervalMs: 60_000 });
     r.onSessionRevoked((e) => got.push(e.jti)).onError((err, ctx) => errors.push(ctx));
     await r.start();
+    await settle(); // the poll start() kicks off, before this test drives poll() itself
     const s = stream(r);
     s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, alice()));
     await r.poll();
@@ -1005,6 +1010,7 @@ describe('SSF / CAEP receiver (poll)', () => {
     r.onSessionRevoked(() => { calls += 1; if (calls === 1) throw new Error('storage unavailable'); });
     r.onError(() => {});
     await r.start();
+    await settle(); // the poll start() kicks off, before this test drives poll() itself
     const s = stream(r);
     s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, alice()));
     await r.poll();
@@ -1018,6 +1024,7 @@ describe('SSF / CAEP receiver (poll)', () => {
     const r2 = await receiver({ pollIntervalMs: 60_000, maxDeliveryAttempts: 2 });
     r2.onSessionRevoked(() => { throw new Error('always'); }).onError((err) => errors.push(err.code));
     await r2.start();
+    await settle(); // the poll start() kicks off, before this test drives poll() itself
     const s2 = stream(r2);
     s2.queue.set('j2', await op.makeSet(s2, CAEP.SESSION_REVOKED, {}, alice()));
     await r2.poll();
@@ -1048,6 +1055,7 @@ describe('SSF / CAEP receiver (poll)', () => {
     const r = await receiver({ pollIntervalMs: 60_000 });
     r.onSessionRevoked(() => {});
     await r.start();
+    await settle(); // the poll start() kicks off, before this test drives poll() itself
     const s = stream(r);
     s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, alice()));
     await r.poll();
@@ -1062,6 +1070,7 @@ describe('SSF / CAEP receiver (poll)', () => {
     const fetch = (input, init) => { seen.push(String(input)); return op.fetch(input, init); };
     const r = await receiver({ fetch, pollIntervalMs: 60_000 });
     await r.start();
+    await settle(); // the poll start() kicks off, before this test drives poll() itself
     r.stream.delivery.endpoint_url = 'https://evil.example/poll';
     await assert.rejects(r.poll(), (e) => e.code === 'untrusted_endpoint');
     r.stream.delivery.endpoint_url = `${op.issuer.replace('https:', 'http:')}/ssf/poll/x`;
