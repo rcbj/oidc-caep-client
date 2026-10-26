@@ -30,7 +30,7 @@ It uses Web APIs only and depends on nothing but [`jose`](https://github.com/pan
 ## Quick look
 
 ```js
-import { OIDCClient, SSFReceiver, TokenManager } from 'oidc-caep-client';
+import { logEventReceived, OIDCClient, SSFReceiver, TokenManager } from 'oidc-caep-client';
 
 const client = await OIDCClient.discover({
   issuer: 'https://idp.example.com',
@@ -47,9 +47,35 @@ await tokens.set('user', await client.callback(location.href));
 const caep = new SSFReceiver({
   transmitterIssuer: 'https://idp.example.com',
   authorizationHeaders: async (req) => client.resourceHeaders(await tokens.getTokenSet('user'), req),
+  // Runs for every event, before the handlers below. The default, logEventReceived, prints
+  // the event's name and jti; replace it with your own logic, or pass null to turn it off.
+  onEventReceived: async (evt) => {
+    logEventReceived(evt);
+    await audit.record(evt.name, evt.subject);
+  },
 });
-caep.onSessionRevoked(() => signOutLocally());
+
+// One handler per event type. Register your own to decide what each event does.
+caep
+  .onSessionRevoked(() => signOutLocally('Your session was ended.'))
+  .onTokenClaimsChange(() => tokens.refresh('user'))
+  .onCredentialChange((evt) => {
+    if (['revoke', 'delete'].includes(evt.payload.change_type)) signOutLocally('Sign in again.');
+  })
+  .onAssuranceLevelChange((evt) => {
+    if (evt.payload.change_direction === 'decrease') requireStepUp();
+  })
+  .onDeviceComplianceChange((evt) => {
+    if (evt.payload.current_status === 'not-compliant') signOutLocally('This device no longer meets policy.');
+  })
+  .onRiskLevelChange((evt) => {
+    if (evt.payload.current_level === 'HIGH') signOutLocally('Unusual activity was detected.');
+  })
+  .onError((err, ctx) => console.warn('CAEP', ctx.phase, err.message));
+
 await caep.start({ catchUp: true });
 ```
+
+Registering a handler for an event type adds to what runs; `caep.off(CAEP.SESSION_REVOKED, fn)` removes one again. `onEvent(uri, fn)` handles any other type, such as RISC events. The [guide](spa-guide.md#9-receive-caep-events) suggests a reaction for each event, and the [reference](reference.md) lists every handler and its payload fields.
 
 MIT licensed. © 2026 Iya CyberSecurity Solutions, LLC.
