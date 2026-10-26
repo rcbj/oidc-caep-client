@@ -92,6 +92,17 @@ There are 53 tests. They run against a strict in-memory OP stub that enforces pu
 - **SSF:** poll delivery with a DPoP-bound user token, and SET validation (signature, audience, `typ`, age, replay).
 - **Browser safety:** a check that the library imports no Node.js built-ins.
 
+## Branches
+
+- **`develop`** is where work comes together. Every feature or fix branch is created from `develop` and merged back into it.
+- **`main`** holds what is released. It receives `develop` when a release is cut, and a push there publishes the library under the npm dist-tag `latest`. A push to `develop` publishes under `next`.
+
+```sh
+git switch develop && git pull
+git switch -c feature/<short-name>    # or fix/<short-name>
+# ... commit, push, and open a pull request into develop
+```
+
 ## Releases and versions
 
 The library is published to npm as [`oidc-caep-client`](https://www.npmjs.com/package/oidc-caep-client) by [`.github/workflows/npm-publish.yml`](.github/workflows/npm-publish.yml). The documentation site at <https://rcbj.github.io/oidc-caep-client/> is built by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) from `docs/`, the package's guide and its README.
