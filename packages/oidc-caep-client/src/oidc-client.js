@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, customFetch, decodeProtectedHeader, errors as joseErrors, jwtVerify } from 'jose';
-import { SUPPORTED_ID_TOKEN_ALGS } from './algs.js';
+import { ASYMMETRIC_JWS_ALGS, SUPPORTED_ID_TOKEN_ALGS } from './algs.js';
 import { discoverOpenIdProvider, validateOpenIdProviderMetadata } from './discovery.js';
 import { DPOP_ALGS, DPoPKey, DPoPNonceCache, MemoryKeyStore, wantsDpopNonce } from './dpop.js';
 import { OAuthError, OIDCClientError, ValidationError } from './errors.js';
@@ -8,7 +8,7 @@ import { codeChallengeS256, generateCodeVerifier, randomToken } from './pkce.js'
 import { registerClient } from './registration.js';
 import { TransactionStore } from './stores.js';
 import { TokenSet } from './token-set.js';
-import { base64url, digest, Emitter, isLoopback, timingSafeEqual } from './util.js';
+import { base64url, digest, Emitter, isSecureUrl, timingSafeEqual } from './util.js';
 
 /**
  * JWT `typ` values that mark a token as something other than an ID token. Presenting one of them as an
@@ -38,6 +38,10 @@ const ENDPOINTS = ['issuer', 'authorization_endpoint', 'token_endpoint', 'jwks_u
  * @property {boolean|{ key?: DPoPKey, keyStore?: object, alg?: string }} [dpop]
  *           DPoP (RFC 9449). `true` generates a non-extractable key kept in memory; pass `keyStore`
  *           (e.g. `new IndexedDBKeyStore()`) to keep it across page loads.
+ * @property {string} [userinfoSignedResponseAlg] The only `alg` a signed UserInfo response may use. Default: any asymmetric algorithm.
+ * @property {boolean} [requireDpop]  With DPoP enabled, refuse a token response whose token_type is Bearer
+ *           (RFC 9449 §5: the AS may fall back, but this client asked for bound tokens). Default: true when
+ *           `dpop` is set. A refresh of DPoP-bound tokens never accepts Bearer, whatever this says.
  * @property {TransactionStore} [transactionStore] Where state/nonce/PKCE verifier wait for the callback (default sessionStorage).
  * @property {number} [transactionTtlSec]       How long an authorization request stays redeemable (default 600).
  * @property {number} [maxIdTokenAgeSec]        Reject ID tokens whose `iat` is older than this (default 600).
@@ -90,6 +94,7 @@ export class OIDCClient extends Emitter {
       requireAuthTime: false,
       allowInsecureRequests: false,
       ...config,
+      requireDpop: config.requireDpop ?? !!config.dpop,
       issuer: config.issuer ?? config.metadata.issuer,
     };
     this.#config.transactionStore ??= new TransactionStore();
@@ -117,6 +122,7 @@ export class OIDCClient extends Emitter {
     if (config.dpop && request.dpop_bound_access_tokens === undefined) request.dpop_bound_access_tokens = true;
     const registration = await registerClient(providerMetadata, request, {
       initialAccessToken,
+      allowInsecureRequests: config.allowInsecureRequests,
       timeoutMs: config.httpTimeoutMs,
       fetch: config.fetch,
     });
@@ -166,10 +172,10 @@ export class OIDCClient extends Emitter {
     // TLS for every endpoint and redirect URI (RFC 9700 §2.6, OIDC Core §16.17), loopback excepted.
     if (!c.allowInsecureRequests) {
       for (const key of ENDPOINTS) {
-        if (m[key] && !secureUrl(m[key])) throw new ValidationError(`${key} must use https: ${m[key]}`, { code: 'insecure_endpoint' });
+        if (m[key] && !isSecureUrl(m[key])) throw new ValidationError(`${key} must use https: ${m[key]}`, { code: 'insecure_endpoint' });
       }
       for (const [name, uri] of [['redirectUri', c.redirectUri], ['postLogoutRedirectUri', c.postLogoutRedirectUri]]) {
-        if (uri && !secureUrl(uri)) throw new ValidationError(`${name} must use https (or loopback http): ${uri}`, { code: 'insecure_redirect_uri' });
+        if (uri && !isSecureUrl(uri)) throw new ValidationError(`${name} must use https (or loopback http): ${uri}`, { code: 'insecure_redirect_uri' });
       }
     }
     // PKCE downgrade protection (RFC 9700 §2.1.1): refuse an OP that says it does not do S256.
@@ -256,7 +262,7 @@ export class OIDCClient extends Emitter {
     const c = this.#config;
     const redirectUri = opts.redirectUri ?? c.redirectUri;
     if (!redirectUri) throw new TypeError('redirectUri is required');
-    if (!c.allowInsecureRequests && !secureUrl(redirectUri)) throw new ValidationError(`redirectUri must use https (or loopback http): ${redirectUri}`, { code: 'insecure_redirect_uri' });
+    if (!c.allowInsecureRequests && !isSecureUrl(redirectUri)) throw new ValidationError(`redirectUri must use https (or loopback http): ${redirectUri}`, { code: 'insecure_redirect_uri' });
 
     const state = randomToken();
     const nonce = randomToken();
@@ -427,10 +433,14 @@ export class OIDCClient extends Emitter {
    * validates any new ID token against the previous claims (§12.2), and sends a DPoP proof with the same
    * key when the tokens are DPoP-bound.
    *
+   * With a bare refresh token string there are no previous claims to hold a new ID token to, so pass
+   * `previousClaims` (the claims of the ID token from the original sign-in); without them a response that
+   * carries an ID token is refused.
+   *
    * @param {TokenSet|string} tokenSetOrRefreshToken
-   * @param {{ scope?: string }} [opts]
+   * @param {{ scope?: string, previousClaims?: object }} [opts]
    */
-  async refresh(tokenSetOrRefreshToken, { scope } = {}) {
+  async refresh(tokenSetOrRefreshToken, { scope, previousClaims: givenClaims } = {}) {
     this.#requireMetadata();
     const previous = typeof tokenSetOrRefreshToken === 'string' ? undefined : TokenSet.from(tokenSetOrRefreshToken);
     const refreshToken = previous ? previous.refresh_token : tokenSetOrRefreshToken;
@@ -440,9 +450,18 @@ export class OIDCClient extends Emitter {
     for (const r of this.#resources()) body.append('resource', r);
 
     const tokens = await this.#tokenRequest(body);
-    let claims = previous?.claims;
+    // A DPoP-bound grant must stay bound: a Bearer reply to it is a downgrade (RFC 9449 §5).
+    if (/^dpop$/i.test(previous?.token_type ?? '') && !/^dpop$/i.test(tokens.token_type)) {
+      throw new ValidationError(`Refresh of DPoP-bound tokens returned token_type ${tokens.token_type}`, { code: 'dpop_downgrade' });
+    }
+    const previousClaims = previous?.claims ?? givenClaims;
+    let claims = previousClaims;
     if (tokens.id_token) {
-      claims = await this.validateIdToken(tokens.id_token, { accessToken: tokens.access_token, previousClaims: previous?.claims });
+      if (!previousClaims) {
+        throw new ValidationError('The refresh returned an ID token, and there are no previous ID token claims to check it against (OIDC Core §12.2); pass a TokenSet or previousClaims',
+          { code: 'invalid_id_token' });
+      }
+      claims = await this.validateIdToken(tokens.id_token, { accessToken: tokens.access_token, previousClaims });
     }
     const tokenSet = new TokenSet({
       ...tokens,
@@ -502,12 +521,17 @@ export class OIDCClient extends Emitter {
   }
 
   /**
-   * Calls the UserInfo endpoint (OIDC Core §5.3). Pass `expectedSub` (the ID token's `sub`): the
-   * response must be about the same person (§5.3.2).
+   * Calls the UserInfo endpoint (OIDC Core §5.3). The response must be about the person the ID token is
+   * about (§5.3.2): its `sub` is checked against `expectedSub`, or else the TokenSet's ID token `sub`.
+   * With a bare access token and no `expectedSub` there is nothing to check against, so it is refused.
    * @param {TokenSet|{access_token: string, token_type?: string}|string} token
    * @param {{ expectedSub?: string }} [opts]
    */
-  async userinfo(token, { expectedSub } = {}) {
+  async userinfo(token, { expectedSub = typeof token === 'object' ? token?.claims?.sub : undefined } = {}) {
+    if (!expectedSub) {
+      throw new ValidationError('UserInfo needs the ID token sub to check the response against (OIDC Core §5.3.2): pass a TokenSet with an ID token, or expectedSub',
+        { code: 'sub_mismatch' });
+    }
     this.#requireMetadata();
     if (!this.metadata.userinfo_endpoint) throw new OIDCClientError('OP has no userinfo_endpoint');
     const res = await this.fetchResource(token, this.metadata.userinfo_endpoint, { headers: { accept: 'application/json, application/jwt' } });
@@ -520,6 +544,7 @@ export class OIDCClient extends Emitter {
     if ((res.headers.get('content-type') ?? '').includes('application/jwt')) {
       const jwt = await res.text();
       ({ payload: claims } = await jwtVerify(jwt, this.#jwks, {
+        algorithms: this.#config.userinfoSignedResponseAlg ? [this.#config.userinfoSignedResponseAlg] : ASYMMETRIC_JWS_ALGS,
         issuer: this.metadata.issuer,
         audience: this.#config.clientId,
         clockTolerance: this.#config.clockToleranceSec,
@@ -527,7 +552,10 @@ export class OIDCClient extends Emitter {
     } else {
       claims = await readJson(res);
     }
-    if (expectedSub && claims.sub !== expectedSub) throw new ValidationError('UserInfo sub does not match ID token sub', { code: 'sub_mismatch' });
+    if (!claims || typeof claims !== 'object' || Array.isArray(claims)) {
+      throw new ValidationError('UserInfo response is not a JSON object', { code: 'invalid_userinfo' });
+    }
+    if (claims.sub !== expectedSub) throw new ValidationError('UserInfo sub does not match ID token sub', { code: 'sub_mismatch' });
     return claims;
   }
 
@@ -568,6 +596,9 @@ export class OIDCClient extends Emitter {
     if (!this.metadata.end_session_endpoint) return undefined;
     const state = randomToken();
     const redirect = postLogoutRedirectUri ?? this.#config.postLogoutRedirectUri;
+    if (redirect && !this.#config.allowInsecureRequests && !isSecureUrl(redirect)) {
+      throw new ValidationError(`postLogoutRedirectUri must use https (or loopback http): ${redirect}`, { code: 'insecure_redirect_uri' });
+    }
     const url = new URL(this.metadata.end_session_endpoint);
     const params = { id_token_hint: idTokenHint, post_logout_redirect_uri: redirect, client_id: this.#config.clientId, logout_hint: logoutHint, state: redirect ? state : undefined };
     for (const [k, v] of Object.entries(params)) if (v) url.searchParams.set(k, v);
@@ -662,9 +693,15 @@ export class OIDCClient extends Emitter {
       throw new ValidationError('ID token at_hash does not match access token', { code: 'invalid_id_token' });
     }
     if (previousClaims) {
-      for (const claim of ['iss', 'sub']) {
+      // OIDC Core §12.2: iss, sub and azp the same (azp absent if it was absent), aud the same.
+      for (const claim of ['iss', 'sub', 'azp']) {
         if (claims[claim] !== previousClaims[claim]) throw new ValidationError(`Refreshed ID token ${claim} changed`, { code: 'invalid_id_token' });
       }
+      const audOf = (v) => [...new Set([].concat(v ?? []))].sort().join(' ');
+      if (audOf(claims.aud) !== audOf(previousClaims.aud)) {
+        throw new ValidationError('Refreshed ID token aud changed', { code: 'invalid_id_token' });
+      }
+      // §12.2 lets a refreshed ID token leave auth_time out; one it carries must be the original time.
       if (previousClaims.auth_time !== undefined && claims.auth_time !== undefined && claims.auth_time !== previousClaims.auth_time) {
         throw new ValidationError('Refreshed ID token auth_time changed', { code: 'invalid_id_token' });
       }
@@ -709,19 +746,16 @@ export class OIDCClient extends Emitter {
     if (!tokens?.access_token) throw new ValidationError('Token response missing access_token', { code: 'invalid_token_response' });
     if (!/^(bearer|dpop)$/i.test(tokens.token_type ?? '')) throw new ValidationError(`Unsupported token_type ${tokens.token_type}`, { code: 'invalid_token_response' });
     if (/^dpop$/i.test(tokens.token_type) && !this.dpopKey) throw new ValidationError('The OP issued a DPoP-bound token but DPoP is not enabled', { code: 'invalid_token_response' });
+    if (this.dpopKey && this.#config.requireDpop && !/^dpop$/i.test(tokens.token_type)) {
+      throw new ValidationError(`DPoP is required, and the OP issued token_type ${tokens.token_type}`, { code: 'dpop_downgrade' });
+    }
     if (tokens.expires_in !== undefined && !(Number.isFinite(Number(tokens.expires_in)) && Number(tokens.expires_in) >= 0)) {
       throw new ValidationError(`Invalid expires_in ${tokens.expires_in}`, { code: 'invalid_token_response' });
     }
-    return tokens;
-  }
-}
-
-function secureUrl(value) {
-  try {
-    const u = new URL(value);
-    return u.protocol === 'https:' || (u.protocol === 'http:' && isLoopback(u.href));
-  } catch {
-    return false;
+    // expires_at, issued_at and claims are this client's own fields, computed from what it validated. The
+    // response doesn't get to set them.
+    const { expires_at: _a, issued_at: _i, claims: _c, ...clean } = tokens;
+    return clean;
   }
 }
 

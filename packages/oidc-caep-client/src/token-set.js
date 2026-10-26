@@ -1,5 +1,7 @@
 import { decodeJwt } from 'jose';
 
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 /**
  * Immutable-ish holder for a token endpoint response. Serializable via toJSON()/TokenSet.from().
  */
@@ -9,8 +11,12 @@ export class TokenSet {
    * @param {object} [claims] Validated ID token claims, if an ID token was issued.
    */
   constructor(tokens, claims) {
-    const { expires_in, ...rest } = tokens;
-    Object.assign(this, rest);
+    const { expires_in, claims: _ignored, ...rest } = tokens;
+    // Field by field rather than Object.assign: a JSON "__proto__" member would otherwise replace this
+    // object's prototype. `claims` comes only from the validated ID token (the second argument).
+    for (const [name, value] of Object.entries(rest)) {
+      if (!UNSAFE_KEYS.has(name)) this[name] = value;
+    }
     if (this.expires_at === undefined && expires_in !== undefined) {
       this.issued_at ??= Math.floor(Date.now() / 1000);
       this.expires_at = this.issued_at + Number(expires_in);

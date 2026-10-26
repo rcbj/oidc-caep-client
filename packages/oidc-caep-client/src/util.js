@@ -39,6 +39,16 @@ export function isLoopback(url) {
   return host === 'localhost' || host.endsWith('.localhost') || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host);
 }
 
+/** https, or plain http to a loopback host. Anything unparseable is not secure. */
+export function isSecureUrl(value) {
+  try {
+    const u = new URL(value);
+    return u.protocol === 'https:' || (u.protocol === 'http:' && isLoopback(u.href));
+  } catch {
+    return false;
+  }
+}
+
 /** A minimal event emitter (Node's EventEmitter API subset), usable in browsers. */
 export class Emitter {
   #listeners = new Map();
