@@ -9,7 +9,10 @@
   "scripts": {
     "test": "node --test packages/oidc-caep-client/test/*.test.js",
     "start": "node demo/server.js",
-    "register-iya-sts": "node scripts/register-iya-sts-client.mjs"
+    "register-iya-sts": "node scripts/register-iya-sts-client.mjs",
+    "version:print": "node scripts/version.mjs",
+    "version:check": "node scripts/version.mjs --check-manifests",
+    "version:sync": "node scripts/version.mjs --sync-manifests"
   },
   "engines": {
     "node": ">=20"
