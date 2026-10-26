@@ -7,7 +7,7 @@
     "demo"
   ],
   "scripts": {
-    "test": "node --test packages/oidc-caep-client/test/*.test.js",
+    "test": "node --test packages/oidc-caep-client/test/*.test.js scripts/*.test.mjs",
     "start": "node demo/server.js",
     "register-iya-sts": "node scripts/register-iya-sts-client.mjs",
     "version:print": "node scripts/version.mjs",

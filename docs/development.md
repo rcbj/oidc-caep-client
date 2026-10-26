@@ -53,14 +53,16 @@ git switch -c feature/<short-name>    # or fix/<short-name>
 
 ## Versions and releases
 
-Versions are **M.N.O**, the same scheme as iya-sts ([`scripts/version.mjs`](https://github.com/rcbj/oidc-caep-client/blob/main/scripts/version.mjs)):
+Versions follow the usual npm form ([`scripts/version.mjs`](https://github.com/rcbj/oidc-caep-client/blob/main/scripts/version.mjs)):
 
 - **M.N** is in the [`VERSION`](https://github.com/rcbj/oidc-caep-client/blob/main/VERSION) file. After bumping it, run `npm run version:sync` so the committed `package.json` files say `M.N.0`. `npm run version:check` (also run in CI) fails if they don't.
-- **O** is the build number: the UTC build time as `YYYYMMDDHHMMSS`, or `BUILD_NUMBER` when set. CI writes it into the package just before packing, so a release needs no version commit.
+- **The patch number** is worked out at build time from the versions already on npm, so nobody edits it: one more than the highest published `M.N` release, from 0. CI writes it into the package just before packing, so a release needs no version commit.
 
-| Push to | npm dist-tag |
-|---|---|
-| `main` | `latest` |
-| `develop` | `next` |
+| Push to | Publishes | npm dist-tag | Example |
+|---|---|---|---|
+| `main` | a release, `M.N.P` | `latest` | `0.2.0`, `0.2.1`, … |
+| `develop` | a pre-release of the next release, `M.N.P-next.R` | `next` | `0.2.1-next.0`, `0.2.1-next.1`, … |
+
+npm never resolves a range like `^0.2.0` to a pre-release, so a `develop` build only reaches someone who installs `@next`. `npm run version:print` shows the next release version; add `-- --channel next` for the next pre-release.
 
 A pull request builds, tests and packs, and publishes nothing. Each published commit is tagged `v<version>`. Publishing uses the repository secret `NPM_TOKEN`, or npm trusted publishing once it is configured.
