@@ -8,7 +8,7 @@ export class TokenSet {
   // whichever the response carried, and the rest stay undefined (JSON storage drops them).
   /** @type {string} */
   access_token;
-  /** @type {string} 'Bearer' or 'DPoP'. */
+  /** 'Bearer' or 'DPoP'. @type {string} */
   token_type;
   /** @type {string|undefined} */
   refresh_token;
@@ -16,11 +16,11 @@ export class TokenSet {
   id_token;
   /** @type {string|undefined} */
   scope;
-  /** @type {number|undefined} Epoch seconds when the access token expires. */
+  /** Epoch seconds when the access token expires. @type {number|undefined} */
   expires_at;
-  /** @type {number|undefined} Epoch seconds when the tokens were issued. */
+  /** Epoch seconds when the tokens were issued. @type {number|undefined} */
   issued_at;
-  /** @type {Record<string, any>|undefined} The validated ID token's claims. */
+  /** The validated ID token's claims. @type {Record<string, any>|undefined} */
   claims;
 
   /**

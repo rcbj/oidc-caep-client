@@ -24,13 +24,21 @@ The tests run with `node:test` against a strict in-memory OpenID Provider and SS
 
 Node.js 24.22.1 or later is required (`.nvmrc`), the release that fixes HTTP2Shell (CVE-2026-111497).
 
+## API references
+
+The site's [TypeScript API](https://rcbj.github.io/oidc-caep-client/api/) (TypeDoc) and [JavaScript API](https://rcbj.github.io/oidc-caep-client/jsdoc/) (JSDoc) are generated from the source's JSDoc by `tools/apidocs`. That is a package of its own, outside the npm workspace, because TypeDoc runs on TypeScript 6 and the library builds its declarations with 7. To build them locally:
+
+```sh
+cd tools/apidocs && npm ci && npm run build   # writes _site_api/api and _site_api/jsdoc
+```
+
 ## Continuous integration
 
 | Workflow | Runs on | Does |
 |---|---|---|
 | [`tests.yml`](https://github.com/rcbj/oidc-caep-client/blob/main/.github/workflows/tests.yml) | every push and pull request | `npm test`, then builds the demo container and smoke-tests the page, its headers and the modules it loads |
 | [`npm-publish.yml`](https://github.com/rcbj/oidc-caep-client/blob/main/.github/workflows/npm-publish.yml) | pushes to `main` and `develop` that change the package | tests, stamps the version, packs and publishes to npm with provenance |
-| [`pages.yml`](https://github.com/rcbj/oidc-caep-client/blob/main/.github/workflows/pages.yml) | pushes to `main` that change the docs | builds and deploys this site |
+| [`pages.yml`](https://github.com/rcbj/oidc-caep-client/blob/main/.github/workflows/pages.yml) | pushes to `main` that change the docs or the library's source | builds this site and the API references, and deploys them |
 
 ## Branches
 

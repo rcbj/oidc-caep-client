@@ -1,0 +1,16 @@
+{
+  "name": "oidc-caep-client-api-docs",
+  "private": true,
+  "description": "Generates the API references for the documentation site: TypeDoc (the TypeScript view, from the JSDoc types) and JSDoc. A package of its own, outside the npm workspace, because TypeDoc runs on TypeScript 6 and the library builds its declarations with TypeScript 7, the native compiler, which has no JavaScript API for TypeDoc to call. iya-sts does the same (tests/tools/jsdoc).",
+  "license": "MIT",
+  "scripts": {
+    "typedoc": "typedoc --options typedoc.json",
+    "jsdoc": "jsdoc --configure jsdoc.json",
+    "build": "npm run typedoc && npm run jsdoc"
+  },
+  "dependencies": {
+    "jsdoc": "4.0.5",
+    "typedoc": "0.28.20",
+    "typescript": "6.0.3"
+  }
+}

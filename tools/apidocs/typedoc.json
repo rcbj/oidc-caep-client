@@ -1,0 +1,17 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "oidc-caep-client",
+  "entryPoints": ["../../packages/oidc-caep-client/src/index.js"],
+  "tsconfig": "tsconfig.json",
+  "out": "../../_site_api/api",
+  "readme": "none",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "sort": ["kind", "alphabetical"],
+  "githubPages": false,
+  "navigationLinks": {
+    "Documentation": "https://rcbj.github.io/oidc-caep-client/",
+    "JSDoc reference": "https://rcbj.github.io/oidc-caep-client/jsdoc/",
+    "GitHub": "https://github.com/rcbj/oidc-caep-client"
+  }
+}
