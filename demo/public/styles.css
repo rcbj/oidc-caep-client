@@ -128,6 +128,11 @@ dd { margin: 0; font-family: var(--mono); font-size: 13px; overflow-wrap: anywhe
 .output { margin: 14px 0 0; padding: 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.event-picker { border: 1px solid var(--border); border-radius: 10px; margin: 14px 0 0; padding: 10px 14px 12px; }
+.event-picker legend { font-size: 13px; font-weight: 600; padding: 0 6px; }
+.event-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 6px 14px; font-size: 14px; }
+.event-options .check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.event-picker .actions { align-items: center; }
 .chip { font: 12px var(--mono); padding: 2px 8px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); }
 
 .banner-area { max-width: 1200px; margin: 0 auto; padding: 0 24px; }

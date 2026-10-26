@@ -1,5 +1,5 @@
 {
   "metadataUrl": "https://localhost:8081/.well-known/openid-configuration",
   "client_id": "oidc-caep-demo",
-  "scopes": "openid profile email offline_access ssf.read"
+  "scopes": "openid profile email offline_access ssf.read ssf.manage"
 }

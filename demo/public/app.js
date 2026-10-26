@@ -17,7 +17,8 @@ import {
 const $ = (id) => document.getElementById(id);
 const ORIGIN = location.origin;
 const URLS = { redirectUri: `${ORIGIN}/callback`, postLogoutRedirectUri: `${ORIGIN}/` };
-const DEFAULT_CAEP_EVENTS = ['session-revoked', 'credential-change', 'token-claims-change', 'assurance-level-change', 'device-compliance-change'];
+// Every CAEP 1.0 event type, by its short name. A stream asks for the ones selected on the CAEP tab.
+const CAEP_EVENTS = Object.values(CAEP).map((uri) => uri.split('/').pop());
 const CONFIG_KEY = 'oidc-caep-demo.config';
 // Shared by the tabs (localStorage): each account's stream id.
 const STREAMS_KEY = 'oidc-caep-demo.stream-ids';
@@ -26,6 +27,8 @@ const STREAMS_KEY = 'oidc-caep-demo.stream-ids';
 const LOG_KEY = 'oidc-caep-demo.event-log';
 const PAGE_TAB_KEY = 'oidc-caep-demo.page-tab';
 const LABELS_KEY = 'oidc-caep-demo.labels';
+// Shared by the tabs (localStorage): the event types this browser subscribes its streams to.
+const EVENTS_KEY = 'oidc-caep-demo.caep-events';
 // Kept when the configuration file changes. DPoP, PAR and the CAEP subscription used to be form fields.
 const CLIENT_DEFAULTS = {
   dpop: true,
@@ -36,7 +39,6 @@ const CLIENT_DEFAULTS = {
     maxSetAgeSec: 3600,
     subjectFormat: 'iss_sub',
     onlyUser: true,
-    events: DEFAULT_CAEP_EVENTS,
   },
 };
 
@@ -332,6 +334,22 @@ async function rememberProfile(account, getTokenSet) {
   all[account.key] = { name, username };
   store.set(LABELS_KEY, all, sessionStorage);
 }
+/** The event types to subscribe to: the saved selection, or every CAEP type. */
+function selectedEvents() {
+  const saved = store.get(EVENTS_KEY);
+  return Array.isArray(saved) ? CAEP_EVENTS.filter((n) => saved.includes(n)) : CAEP_EVENTS;
+}
+const eventUris = (names) => names.map((n) => Object.values(CAEP).find((u) => u.endsWith(`/${n}`)));
+
+/** Asks the transmitter for the selected event types when the stream asks for others. Needs ssf.manage. */
+async function syncEvents(r) {
+  const want = eventUris(selectedEvents());
+  const have = r.stream?.events_requested ?? [];
+  if (want.length === have.length && want.every((u) => have.includes(u))) return false;
+  await r.updateStream({ events_requested: want });
+  return true;
+}
+
 const canReadStream = (scopes) => scopes.includes('ssf.read') || scopes.includes('ssf.manage');
 const canWriteStream = (scopes) => scopes.includes('ssf.manage');
 // The verify button follows the configuration. The transmitter still refuses a write the token lacks.
@@ -356,7 +374,7 @@ function makeReceiver(account, getTokenSet, streamId) {
     streamId,
     // Every management and poll call carries THIS account's access token, with a DPoP proof when bound.
     authorizationHeaders: async (req) => client.resourceHeaders(await getTokenSet(), req),
-    eventsRequested: c.events.map((n) => Object.values(CAEP).find((u) => u.endsWith(`/${n}`))),
+    eventsRequested: eventUris(selectedEvents()),
     description: `oidc-caep-client in-browser demo @ ${ORIGIN} (${labelOf(account)})`,
     pollIntervalMs: 5000,
     maxSetAgeSec: c.maxSetAgeSec,
@@ -423,10 +441,13 @@ async function startCaep(account, getTokenSet) {
     }
     caep.receiver = r;
     rememberStream(key, r.stream.stream_id);
+    if (write) {
+      await syncEvents(r).catch((err) => log({ account: key, name: 'subscription', action: `Could not update the stream's event types: ${describe(err)}` }));
+    }
     if (write && config.caep.onlyUser && r.metadata.add_subject_endpoint) {
       await r.addSubject(subjectFor(account)).catch((err) => log({ account: key, name: 'subject', action: `Could not add the subject: ${describe(err)}` }));
     }
-    caep.state = { status: 'connected', transmitter: transmitterIssuer(), streamStatus: r.stream.status ?? 'enabled' };
+    caep.state = { status: 'connected', transmitter: transmitterIssuer(), streamStatus: r.stream.status ?? 'enabled', write };
     if (write) r.requestVerification({ timeoutMs: 30_000 }).catch(() => {});
   } catch (err) {
     // Shown on the stream card; the account is still activated so the person is not locked out by an
@@ -728,12 +749,35 @@ function renderStream() {
     ...((accounts?.list().length ?? 0) > 1 ? [['other accounts', 'dormant: their streams keep queueing at the transmitter, and are caught up when the account is activated']] : []),
   ].flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
   $('ssf-events').replaceChildren(...(s?.events_delivered ?? []).map((e) => el('span', { class: 'chip', title: e }, e.split('/').pop())));
+  renderEventPicker(me && caep.key === me.key && caep.receiver ? caep.state : undefined);
   $('btn-verify').disabled = !s || !streamWrite();
   $('btn-verify').title = streamWrite() ? '' : 'Needs the ssf.manage scope';
   $('btn-reconnect').disabled = !me || !config?.caep?.enabled;
   $('ssf-error').hidden = !ssfState.error;
   $('ssf-error').textContent = ssfState.error ?? '';
   $('live').classList.toggle('on', !!caep.receiver);
+}
+
+/** The checkboxes are drawn once and kept as the person left them; this sets the button and the note. */
+function renderEventPicker(state) {
+  const picked = pickedEvents();
+  const saved = selectedEvents();
+  const dirty = picked.length !== saved.length || picked.some((n) => !saved.includes(n));
+  const button = $('btn-events');
+  button.disabled = !state?.write || !picked.length || !dirty;
+  $('events-note').textContent = !state
+    ? 'Sign in to change this stream\'s event types.'
+    : !state.write
+      ? 'Changing the stream needs the ssf.manage scope. This sign-in was issued ssf.read only.'
+      : !picked.length ? 'Choose at least one event type.' : dirty ? 'Not applied yet.' : 'The stream asks for these.';
+}
+const pickedEvents = () => [...document.querySelectorAll('#event-options input:checked')].map((i) => i.value);
+
+function drawEventOptions() {
+  const saved = selectedEvents();
+  $('event-options').replaceChildren(...CAEP_EVENTS.map((name) => el('label', { class: 'check' },
+    el('input', { type: 'checkbox', value: name, ...(saved.includes(name) ? { checked: '' } : {}), onchange: () => renderStream() }),
+    el('span', {}, name))));
 }
 
 function renderBanners() {
@@ -1022,6 +1066,20 @@ $('btn-verify').addEventListener('click', (e) => withBusy(e.currentTarget, async
     render();
   }
 }));
+// Not withBusy: its finally would enable the button again, and renderStream() decides that.
+$('btn-events').addEventListener('click', async (e) => {
+  e.currentTarget.disabled = true;
+  store.set(EVENTS_KEY, pickedEvents());
+  const r = caep.receiver;
+  try {
+    if (r && caep.state.write && await syncEvents(r)) {
+      log({ account: caep.key, name: 'subscription', action: `Stream now asks for: ${selectedEvents().join(', ')}.` });
+    }
+  } catch (err) {
+    caep.state = { ...caep.state, error: `Could not update the stream's event types: ${describe(err)}` };
+  }
+  render();
+});
 $('btn-reconnect').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
   const me = signedIn();
   const tokens = (opts) => accounts.getTokenSet(opts);
@@ -1036,6 +1094,7 @@ $('btn-reconnect').addEventListener('click', (e) => withBusy(e.currentTarget, as
 // ---------------------------------------------------------------------------
 
 async function start() {
+  drawEventOptions();
   try {
     const res = await fetch('/oidc.json', { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status} reading /oidc.json`);
