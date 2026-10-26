@@ -27,14 +27,14 @@ These stay on without a setting in the file:
 
 - **DPoP**, with the key kept in this tab's session storage;
 - **PAR** whenever the IdP offers it;
-- every signed-in account's tokens cached in this tab's **session storage**. Only the tab's active account's tokens are used. Closing the tab clears the cache. The configuration, stream ids and event log stay in local storage.
+- every signed-in account's tokens cached in this tab's **session storage**. Only the tab's active account's tokens are used. Closing the tab clears the cache, and the event log with it. The configuration and stream ids stay in local storage.
 - **CAEP:** the transmitter issuer is the OIDC issuer. The stream is created with the signed-in user's access token, carrying a DPoP proof when bound, and polled from the browser (RFC 8936). When that token includes `ssf.manage`, the user is added as the stream's only subject. `ssf.read` only polls.
 
 Then click **Sign in**. The page has two tabs, and every pane on the selected tab stays visible.
 
 **Identity** shows sign-in, the protections in effect, the session, the token cache, and the raw and decoded tokens.
 
-**CAEP events** shows the stream and the live event log.
+**CAEP events** shows the stream and the live event log of the active account.
 
 It reacts to events about the signed-in user: `session-revoked` signs them out, `token-claims-change` refreshes their tokens, an assurance drop requires step-up, and so on.
 
@@ -45,7 +45,7 @@ You can be signed in with several accounts at once, as iya-sts allows with `auth
 - **Switch account**, in the menu under your name, makes another cached account active in this tab, with no password. Before the switch completes, the account's stream catches up on the signals queued while it was dormant. If one of them ended its session, the account shows as ended and its tokens are never used. The log marks such signals *(caught up on activation)*.
 - **Each tab has its own cache.** A new tab starts signed out. Closing the tab clears its tokens and its DPoP key.
 - **Sign in with another account** is a fresh sign-in (`prompt=login`) that adds an account. **Choose at the identity provider** opens the IdP's account picker (`prompt=select_account`).
-- In the **event log**, **This account** shows the active account's signals and **All accounts** shows the signals every tab has received, each marked with its account. A badge counts the signals for another account that this tab hasn't seen yet.
+- The **event log** shows the active account's signals only. iya-sts lets a session that subscribes to a stream see only events about its own authenticated user, and the page keeps to the same rule: another account's signals, from this tab or another one, are never shown. The log is kept in the tab's session storage, and signing an account out (or forgetting it) deletes its signals from it. After a switch it shows the account now active, including the signals it caught up on.
 - A signal that ends a session ends **that account only**, and offers **Sign in again**. That sign-in names the account (`login_hint`/`id_token_hint`) and refuses a sign-in as anybody else. A `session-revoked` naming another of the person's sessions (`sid`) is ignored.
 - **Sign out** on an account sends a logout naming its ID token, so the IdP ends that session and keeps the others. It also deletes the account's stream, and the other tabs see the account as signed out.
 

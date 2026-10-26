@@ -19,13 +19,12 @@ const ORIGIN = location.origin;
 const URLS = { redirectUri: `${ORIGIN}/callback`, postLogoutRedirectUri: `${ORIGIN}/` };
 const DEFAULT_CAEP_EVENTS = ['session-revoked', 'credential-change', 'token-claims-change', 'assurance-level-change', 'device-compliance-change'];
 const CONFIG_KEY = 'oidc-caep-demo.config';
-// Shared by the tabs (localStorage): each account's stream id, and the signals every tab has received.
+// Shared by the tabs (localStorage): each account's stream id.
 const STREAMS_KEY = 'oidc-caep-demo.stream-ids';
+// Per tab (sessionStorage): the signals this tab received. The transmitter lets a session see only events
+// about its own user, so the log shows the active account's alone and is never shared with other tabs.
 const LOG_KEY = 'oidc-caep-demo.event-log';
-// Per tab (sessionStorage): which log view, and when this tab last looked at each account's signals.
-const LOG_VIEW_KEY = 'oidc-caep-demo.log-view';
 const PAGE_TAB_KEY = 'oidc-caep-demo.page-tab';
-const SEEN_KEY = 'oidc-caep-demo.seen';
 const LABELS_KEY = 'oidc-caep-demo.labels';
 // Kept when the configuration file changes. DPoP, PAR and the CAEP subscription used to be form fields.
 const CLIENT_DEFAULTS = {
@@ -131,7 +130,7 @@ async function applyConfig(cfg) {
   validateOpenIdProviderMetadata(metadata);
   if (!cfg.clientId) throw new Error('client_id is required');
   // This tab only. sessionStorage survives the redirect to the IdP and a reload, and closes with the tab.
-  // localStorage is left for the configuration, the stream ids and the event log.
+  // localStorage is left for the configuration and the stream ids.
   const tabStorage = globalThis.sessionStorage;
   client = await OIDCClient.fromMetadata(metadata, {
     redirectUri: URLS.redirectUri,
@@ -164,6 +163,9 @@ async function applyConfig(cfg) {
     s.lastRefresh = Date.now();
     render();
   });
+  // A signed-out or forgotten account's signals leave the tab with it.
+  accounts.on('signed-out', (a) => clearLog(a.key));
+  accounts.on('forgotten', (a) => clearLog(a.key));
   accounts.on('ended', (a, reason) => {
     ui.ended.set(a.key, reason);
     render();
@@ -460,32 +462,27 @@ async function deleteStream(account, getTokenSet) {
   } catch { /* the transmitter forgets an unused stream on its own */ }
 }
 
-/** The signals every tab has received, newest first (shared through localStorage). */
-const eventLog = () => store.get(LOG_KEY) ?? [];
-let logView = store.get(LOG_VIEW_KEY, sessionStorage) ?? 'active';
+// The log used to be shared through localStorage, where every tab could read every account's signals.
+store.del(LOG_KEY);
+
+/** The signals this tab has received, newest first, for every account it has had active. */
+const eventLog = () => store.get(LOG_KEY, sessionStorage) ?? [];
+
+/** Removes one account's signals from this tab. */
+function clearLog(key) {
+  store.set(LOG_KEY, eventLog().filter((e) => e.account !== key), sessionStorage);
+  renderLog();
+}
 
 function log(entry) {
   const entries = eventLog();
-  // Poll delivery is at-least-once, and two tabs with the same active account poll the same stream.
+  // Poll delivery is at-least-once.
   if (entry.jti && entries.some((e) => e.jti === entry.jti && e.account === entry.account)) return;
-  const full = { at: Date.now(), label: labelOf(accounts.get(entry.account)), ...entry };
+  const full = { at: Date.now(), ...entry };
   entries.unshift(full);
   entries.length = Math.min(entries.length, 300);
-  store.set(LOG_KEY, entries);
+  store.set(LOG_KEY, entries, sessionStorage);
   renderLog(full.at);
-}
-
-/** Signals this tab has not looked at yet, for an account that is not active here. */
-function unreadFor(key) {
-  if (key === accounts?.activeKey) return 0;
-  const seen = store.get(SEEN_KEY, sessionStorage)?.[key] ?? 0;
-  return eventLog().filter((e) => e.account === key && e.at > seen).length;
-}
-function markSeen(key) {
-  if (!key) return;
-  const seen = store.get(SEEN_KEY, sessionStorage) ?? {};
-  seen[key] = Date.now();
-  store.set(SEEN_KEY, seen, sessionStorage);
 }
 
 /** Wraps a policy for one account's stream: only events about that account (or the stream) are acted on. */
@@ -576,7 +573,6 @@ async function render() {
   const configured = !!client;
   const me = signedIn();
   const list = accounts?.list() ?? [];
-  if (me) markSeen(me.key);
 
   renderWho(list);
   renderHero(list);
@@ -641,11 +637,6 @@ function avatar(a, cls = '') {
   return el('span', { class: `avatar ${cls}`, 'aria-hidden': 'true' }, initialOf(a));
 }
 
-function badge(key) {
-  const n = unreadFor(key);
-  return n ? el('span', { class: 'badge', title: `${n} new signal${n > 1 ? 's' : ''}` }, String(n)) : '';
-}
-
 function closeMenu() {
   const menu = document.querySelector('.acct-menu');
   if (menu) menu.open = false;
@@ -658,18 +649,15 @@ function renderWho(list) {
   if (!list.length) return who.replaceChildren(el('button', { class: 'btn primary', onclick: () => signIn() }, 'Sign in'));
   const cur = accounts.active;
   const others = list.filter((a) => a.key !== cur?.key);
-  const otherUnread = others.reduce((n, a) => n + unreadFor(a.key), 0);
   const wasOpen = document.querySelector('.acct-menu')?.open;
   const row = (a) => el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => activate(a.key) },
     avatar(a),
     el('span', { class: 'menu-who' }, el('span', {}, labelOf(a)), a.email ? el('span', { class: 'muted small' }, a.email) : ''),
-    a.status === 'signed-in' ? '' : el('span', { class: `pill ${STATUS[a.status][0]}` }, STATUS[a.status][1]),
-    badge(a.key));
+    a.status === 'signed-in' ? '' : el('span', { class: `pill ${STATUS[a.status][0]}` }, STATUS[a.status][1]));
   const menu = el('details', { class: 'acct-menu' },
     el('summary', { 'aria-label': 'Switch account' },
       cur ? avatar(cur) : '',
       el('span', { class: 'menu-name' }, cur ? labelOf(cur) : 'Choose an account'),
-      otherUnread ? el('span', { class: 'badge', title: 'New signals for your other accounts' }, String(otherUnread)) : '',
       el('span', { class: 'caret', 'aria-hidden': 'true' }, '▾')),
     el('div', { class: 'menu', role: 'menu' },
       el('p', { class: 'menu-head' }, 'Switch account'),
@@ -810,61 +798,32 @@ const SEVERITY = {
   verification: 'ok', 'stream-updated': 'info',
 };
 
-/** The event log, for the active account or for every account. `freshAt` flashes the entry just received. */
+/** The event log: the active account's signals only. `freshAt` flashes the entry just received. */
 function renderLog(freshAt) {
   const cur = accounts?.activeKey;
-  const entries = eventLog();
-  const all = logView === 'all' || !cur;
-  const shown = entries.filter((e) => all || e.account === cur);
-  for (const b of document.querySelectorAll('.log-seg')) {
-    b.classList.toggle('on', b.dataset.view === logView);
-    b.setAttribute('aria-selected', String(b.dataset.view === logView));
-  }
-  const multi = (accounts?.list().length ?? 0) > 1 || entries.some((e) => e.account && e.account !== cur);
-  $('log').replaceChildren(...shown.map((entry) => logEntry(entry, entry.at === freshAt, all && multi)));
+  const shown = cur ? eventLog().filter((e) => e.account === cur) : [];
+  $('log').replaceChildren(...shown.map((entry) => logEntry(entry, entry.at === freshAt)));
   $('btn-clear-log').disabled = shown.length === 0;
   $('log-empty').hidden = shown.length > 0;
-  $('log-empty').textContent = entries.length && !all
-    ? `No signals for ${labelOf(accounts.active)} yet. Switch to "All accounts" to see the others'.`
+  $('log-empty').textContent = cur
+    ? `No CAEP events for ${labelOf(accounts.active)} yet. Trigger one at your identity provider (for example, revoke your session).`
     : 'No CAEP events yet. Sign in, then trigger an event at your identity provider (for example, revoke your session).';
-  const others = (accounts?.list() ?? []).reduce((n, a) => n + unreadFor(a.key), 0);
-  $('log-all-count').textContent = others ? ` (${others} new)` : '';
 }
 
-function logEntry(entry, fresh, showAccount) {
+function logEntry(entry, fresh) {
   const node = $('log-item').content.firstElementChild.cloneNode(true);
   const evt = node.querySelector('.evt');
   evt.textContent = entry.name;
   evt.className = `evt ${SEVERITY[entry.name] ?? 'info'}`;
   evt.title = entry.type ?? '';
   node.querySelector('time').textContent = new Date(entry.at).toLocaleTimeString();
-  const who = node.querySelector('.log-who');
-  who.hidden = !showAccount;
-  who.textContent = entry.label ?? '—';
   node.querySelector('.action').textContent = entry.action;
   node.querySelector('pre').textContent = JSON.stringify({ subject: entry.subject, payload: entry.payload, jti: entry.jti }, null, 2);
   if (fresh) node.classList.add('fresh');
   return node;
 }
 
-for (const b of document.querySelectorAll('.log-seg')) {
-  b.addEventListener('click', () => {
-    logView = b.dataset.view;
-    store.set(LOG_VIEW_KEY, logView, sessionStorage);
-    renderLog();
-  });
-}
-$('btn-clear-log').addEventListener('click', () => {
-  const cur = accounts?.activeKey;
-  const all = logView === 'all' || !cur;
-  const kept = all ? [] : eventLog().filter((e) => e.account !== cur);
-  store.set(LOG_KEY, kept);
-  render();
-});
-// Signals received by the other tabs.
-window.addEventListener('storage', (e) => {
-  if (e.key === LOG_KEY) render();
-});
+$('btn-clear-log').addEventListener('click', () => clearLog(accounts?.activeKey));
 
 // --- Tokens card -------------------------------------------------------------
 
