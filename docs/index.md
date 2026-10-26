@@ -13,6 +13,24 @@ An OpenID Connect client library for **browser single-page apps**. It runs entir
 
 It uses Web APIs only and depends on nothing but [`jose`](https://github.com/panva/jose).
 
+## Install
+
+```sh
+npm install oidc-caep-client
+```
+
+That adds the package to your `package.json`:
+
+```json
+{
+  "dependencies": {
+    "oidc-caep-client": "^0.1.0"
+  }
+}
+```
+
+Versions are `M.N.O`, with `O` the UTC build time, so `^0.1.0` takes every later 0.1 build; `npm install oidc-caep-client@next` gets the one built from `develop`. [Installing](reference.md#installing) in the reference covers pinning a version and loading the package with or without a bundler.
+
 ## Where to read
 
 - **[Building a browser SPA](spa-guide.md)**, the walkthrough:
