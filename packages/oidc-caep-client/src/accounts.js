@@ -6,7 +6,7 @@ import { base64url, digest, Emitter, withLock } from './util.js';
 
 /** ID token claims an account record keeps, for display and for naming the account to the OP. No tokens. */
 const PROFILE_CLAIMS = ['iss', 'sub', 'sid', 'name', 'given_name', 'family_name', 'preferred_username', 'email',
-  'phone_number', 'picture', 'acr', 'amr', 'auth_time'];
+  'email_verified', 'phone_number', 'phone_number_verified', 'picture', 'acr', 'amr', 'auth_time'];
 
 /**
  * Errors the OP answers a `prompt=none` request with when it would have to show the person a screen
@@ -51,7 +51,8 @@ export function needsInteraction(err) {
 /**
  * @typedef {object} AccountManagerOptions
  * @property {import('./stores.js').TokenStore} [store]  The cache shared by every tab: the account list and
- *           each account's tokens. Default: IndexedDB where it exists (`IndexedDBTokenStore`), else memory.
+ *           each account's tokens. Default: IndexedDB (`IndexedDBTokenStore`) when the client has a DPoP key,
+ *           else memory. A persistent store without DPoP is allowed, with a console warning.
  * @property {import('./stores.js').TokenStore} [tabStore]  Where this tab remembers its active account.
  *           Default: sessionStorage where it exists, else memory.
  * @property {string} [storeKey]                Default "accounts".
@@ -117,7 +118,15 @@ export class AccountManager extends Emitter {
   } = {}) {
     super();
     this.#client = client;
-    this.#store = store ?? (typeof indexedDB === 'undefined' ? new MemoryTokenStore() : new IndexedDBTokenStore());
+    // TOKENS AT REST NEED A SENDER CONSTRAINT (RFC 9700 §2.2.2, OAuth for browser-based apps §8). Refresh
+    // tokens kept across browser restarts are only defensible when they are DPoP-bound to a key script
+    // can't read out. Without DPoP the default is memory: a reload resumes with prompt=none instead.
+    const bound = !!client.dpopKey;
+    this.#store = store ?? (bound && typeof indexedDB !== 'undefined' ? new IndexedDBTokenStore() : new MemoryTokenStore());
+    if (store && !bound && !(store instanceof MemoryTokenStore)) {
+      console.warn('[oidc-caep-client] AccountManager: tokens are kept in persistent browser storage without DPoP. '
+        + 'Any script in the page can read them and use them anywhere; turn on DPoP or use MemoryTokenStore.');
+    }
     this.#tabStore = tabStore ?? (globalThis.sessionStorage ? new WebStorageTokenStore({ prefix: 'oidc-caep-client:tab:' }) : new MemoryTokenStore());
     this.#storeKey = storeKey;
     this.#opts = {
@@ -175,7 +184,8 @@ export class AccountManager extends Emitter {
   /** The identity `subjectMatches()` compares a security event's subject with. */
   identity(key) {
     const a = this.#accounts.get(key);
-    return a && { iss: a.iss, sub: a.sub, email: a.email, phone_number: a.phone_number, sid: a.sid };
+    return a && { iss: a.iss, sub: a.sub, sid: a.sid, email: a.email, email_verified: a.email_verified,
+      phone_number: a.phone_number, phone_number_verified: a.phone_number_verified };
   }
 
   /**

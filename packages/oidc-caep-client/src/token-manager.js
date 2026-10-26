@@ -96,7 +96,7 @@ export class TokenManager extends Emitter {
       const before = await this.get(key);
       if (!before) throw new OIDCClientError(`No tokens cached for ${key}`, { code: 'no_tokens' });
       try {
-        return await withLock(`oidc-caep-client:refresh:${key}`, async () => {
+        return await withLock(refreshLock(key), async () => {
           // Another tab sharing the store may have refreshed while this one waited for the lock.
           const current = await this.get(key);
           if (!current) throw new OIDCClientError(`Tokens for ${key} were removed`, { code: 'no_tokens' });
@@ -105,8 +105,13 @@ export class TokenManager extends Emitter {
             return current;
           }
           const next = await this.#client.refresh(current);
-          // The key may have been deleted (e.g. CAEP session revoked) while the request was in flight.
+          // The key may have been deleted while the request was in flight, by a delete() in another tab
+          // (this tab's waits for the lock). Its new tokens are revoked rather than left valid at the OP.
           if (!(await this.#store.get(key))) {
+            await Promise.allSettled([
+              next.refresh_token && this.#client.revoke(next.refresh_token, 'refresh_token'),
+              this.#client.revoke(next.access_token, 'access_token'),
+            ]);
             throw new OIDCClientError(`Tokens for ${key} were removed during refresh`, { code: 'no_tokens' });
           }
           await this.set(key, next, { schedule: this.#wanted.has(key) });
@@ -131,8 +136,13 @@ export class TokenManager extends Emitter {
    * @param {{ revoke?: boolean }} [opts]
    */
   async delete(key, { revoke = false } = {}) {
-    const ts = await this.get(key);
-    await this.#drop(key, 'removed');
+    // Under the refresh lock: a refresh in flight finishes first, so it can't write its tokens back after
+    // they were removed (e.g. on a CAEP session-revoked).
+    const ts = await withLock(refreshLock(key), async () => {
+      const held = await this.get(key);
+      await this.#drop(key, 'removed');
+      return held;
+    });
     if (revoke && ts) {
       await Promise.allSettled([
         ts.refresh_token && this.#client.revoke(ts.refresh_token, 'refresh_token'),
@@ -206,4 +216,9 @@ export class TokenManager extends Emitter {
     timer.unref?.();
     this.#timers.set(key, timer);
   }
+}
+
+/** The lock one key's refreshes and deletes share, across this origin's tabs. */
+function refreshLock(key) {
+  return `oidc-caep-client:refresh:${key}`;
 }

@@ -68,7 +68,7 @@ async function createStubProvider(opts = {}) {
   const b64sha = (v) => createHash('sha256').update(v).digest('base64url');
 
   async function idToken(sub, { nonce, accessToken, authTime, typ, iat, sid }) {
-    return new SignJWT({ nonce, at_hash: createHash('sha256').update(accessToken).digest().subarray(0, 16).toString('base64url'), auth_time: authTime, acr: state.acr, email: `${sub}@example.com`, preferred_username: sub, sid })
+    return new SignJWT({ nonce, at_hash: createHash('sha256').update(accessToken).digest().subarray(0, 16).toString('base64url'), auth_time: authTime, acr: state.acr, email: `${sub}@example.com`, email_verified: true, preferred_username: sub, sid })
       .setProtectedHeader({ alg: 'RS256', kid, ...(typ ? { typ } : {}) }).setIssuer(issuer).setSubject(sub)
       .setAudience(clientId).setIssuedAt(iat ?? now()).setExpirationTime('5m').sign(privateKey);
   }
@@ -224,6 +224,11 @@ async function createStubProvider(opts = {}) {
       }
       if (p.startsWith('/ssf/poll/')) {
         for (const jti of data.ack ?? []) stream.queue.delete(jti);
+        for (const [jti, err] of Object.entries(data.setErrs ?? {})) {
+          (stream.errs ??= {})[jti] = err;
+          stream.queue.delete(jti);
+        }
+        state.lastPoll = data;
         return json({ sets: Object.fromEntries(stream.queue), moreAvailable: false });
       }
     }
@@ -493,7 +498,7 @@ describe('DPoP (RFC 9449)', () => {
     assert.equal((await client.userinfo(tokens, { expectedSub: 'alice' })).sub, 'alice');
     assert.equal((await client.refresh(tokens)).token_type, 'DPoP');
     // The same token presented as a plain bearer token is refused by the resource server.
-    await assert.rejects(client.userinfo(tokens.access_token), (e) => e.status === 401);
+    await assert.rejects(client.userinfo(tokens.access_token, { expectedSub: 'alice' }), (e) => e.status === 401);
   });
 
   it('retries with the server nonce at the token endpoint and at a resource server', async () => {
@@ -927,7 +932,7 @@ describe('SSF / CAEP receiver (poll)', () => {
 
     const lines = [];
     const original = console.log;
-    console.log = (...args) => lines.push(args[0]);
+    console.log = (...args) => lines.push(args);
     try {
       const quiet = await receiver();
       const loud = await receiver({ onEventReceived: logEventReceived });
@@ -941,8 +946,154 @@ describe('SSF / CAEP receiver (poll)', () => {
       console.log = original;
     }
     assert.equal(lines.length, 1);
-    assert.match(lines[0], /^\[oidc-caep-client\] CAEP event received: credential-change \(jti /);
+    assert.equal(lines[0].length, 1, 'the default log line carries no event body (personal data)');
+    assert.match(lines[0][0], /^\[oidc-caep-client\] CAEP event received: credential-change \(jti /);
     assert.throws(() => new SSFReceiver({ transmitterIssuer: op.issuer, onEventReceived: 'log' }), /function/);
+  });
+
+  // --- the 2026-10-26 security review --------------------------------------------------------------
+  const signSet = (s, claims, header = {}) => new SignJWT({ jti: randomUUID(), ...claims })
+    .setProtectedHeader({ alg: 'RS256', kid: 'k1', typ: 'secevent+jwt', ...header })
+    .setIssuer(op.issuer).setAudience(s.aud).sign(op.privateKey);
+  const alice = () => Subject.issSub(op.issuer, 'alice');
+
+  it('acts on a queued SET however old it is, and refuses only an iat in the future', async () => {
+    const got = [];
+    const r = await receiver({ pollIntervalMs: 60_000 });
+    r.onSessionRevoked((e) => got.push(e.jti));
+    await r.start();
+    const s = stream(r);
+    const old = await signSet(s, { iat: Math.floor(Date.now() / 1000) - 2 * 3600, sub_id: alice(), events: { [CAEP.SESSION_REVOKED]: {} } });
+    const future = await signSet(s, { iat: Math.floor(Date.now() / 1000) + 3600, sub_id: alice(), events: { [CAEP.SESSION_REVOKED]: {} } });
+    s.queue.set('old', old);
+    s.queue.set('future', future);
+    await r.poll();
+    assert.equal(got.length, 1, 'the two-hour-old session-revoked is handled');
+    await r.poll();
+    assert.deepEqual(op.state.lastPoll.ack, ['old']);
+    assert.match(s.errs.future.description, /future/);
+    await r.stop();
+  });
+
+  it('leaves a SET for redelivery when its signing keys cannot be fetched, instead of reporting it invalid', async () => {
+    let failJwks = 1;
+    const fetch = (input, init) => {
+      if (String(input).endsWith('/jwks') && failJwks-- > 0) return Promise.reject(new TypeError('fetch failed: ECONNRESET'));
+      return op.fetch(input, init);
+    };
+    const got = [];
+    const errors = [];
+    const r = await receiver({ fetch, pollIntervalMs: 60_000 });
+    r.onSessionRevoked((e) => got.push(e.jti)).onError((err, ctx) => errors.push(ctx));
+    await r.start();
+    const s = stream(r);
+    s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, alice()));
+    await r.poll();
+    assert.equal(got.length, 0);
+    assert.equal(errors[0].willRetry, true);
+    await r.poll();
+    assert.equal(s.errs, undefined, 'nothing was reported to the transmitter as an error');
+    assert.equal(got.length, 1, 'the redelivered SET is handled');
+    await r.poll();
+    assert.equal(s.queue.size, 0, 'and acknowledged');
+    await r.stop();
+  });
+
+  it('acknowledges a SET only once its handlers succeed, and gives up after maxDeliveryAttempts', async () => {
+    let calls = 0;
+    const r = await receiver({ pollIntervalMs: 60_000 });
+    r.onSessionRevoked(() => { calls += 1; if (calls === 1) throw new Error('storage unavailable'); });
+    r.onError(() => {});
+    await r.start();
+    const s = stream(r);
+    s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, alice()));
+    await r.poll();
+    await r.poll();
+    assert.equal(calls, 2, 'redelivered after the handler threw, and not dropped as a replay');
+    await r.poll();
+    assert.equal(s.queue.size, 0);
+    await r.stop();
+
+    const errors = [];
+    const r2 = await receiver({ pollIntervalMs: 60_000, maxDeliveryAttempts: 2 });
+    r2.onSessionRevoked(() => { throw new Error('always'); }).onError((err) => errors.push(err.code));
+    await r2.start();
+    const s2 = stream(r2);
+    s2.queue.set('j2', await op.makeSet(s2, CAEP.SESSION_REVOKED, {}, alice()));
+    await r2.poll();
+    await r2.poll();
+    await r2.poll();
+    assert.ok(errors.includes('handler_failed'));
+    assert.equal(s2.queue.size, 0);
+    await r2.stop();
+  });
+
+  it('reports a handler failure on the console when no onError is registered', async () => {
+    const lines = [];
+    const original = console.error;
+    console.error = (...args) => lines.push(args.join(' '));
+    try {
+      const r = await receiver();
+      r.onSessionRevoked(() => { throw new Error('boom'); });
+      await r.start();
+      await r.receiveSet(await op.makeSet(stream(r), CAEP.SESSION_REVOKED, {}, alice()));
+      await r.stop();
+    } finally {
+      console.error = original;
+    }
+    assert.ok(lines.some((l) => /handler: boom/.test(l)), lines.join('\n'));
+  });
+
+  it('sends acknowledgements still owed when stopped', async () => {
+    const r = await receiver({ pollIntervalMs: 60_000 });
+    r.onSessionRevoked(() => {});
+    await r.start();
+    const s = stream(r);
+    s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, alice()));
+    await r.poll();
+    await r.stop();
+    assert.deepEqual(op.state.lastPoll.ack, ['j1']);
+    assert.equal(op.state.lastPoll.maxEvents, 0);
+    assert.equal(s.queue.size, 0);
+  });
+
+  it('never sends the access token to a poll endpoint off the transmitter, or to an http SSF URL', async () => {
+    const seen = [];
+    const fetch = (input, init) => { seen.push(String(input)); return op.fetch(input, init); };
+    const r = await receiver({ fetch, pollIntervalMs: 60_000 });
+    await r.start();
+    r.stream.delivery.endpoint_url = 'https://evil.example/poll';
+    await assert.rejects(r.poll(), (e) => e.code === 'untrusted_endpoint');
+    r.stream.delivery.endpoint_url = `${op.issuer.replace('https:', 'http:')}/ssf/poll/x`;
+    await assert.rejects(r.poll(), (e) => e.code === 'insecure_endpoint');
+    assert.ok(!seen.some((u) => u.startsWith('https://evil.example') || u.startsWith('http:')));
+    await r.stop();
+
+    const httpJwks = async (input, init) => {
+      const res = await op.fetch(input, init);
+      if (!String(input).endsWith('/.well-known/ssf-configuration')) return res;
+      return new Response(JSON.stringify({ ...(await res.json()), jwks_uri: 'http://op.test/jwks' }), { headers: { 'content-type': 'application/json' } });
+    };
+    clearDiscoveryCache();
+    const r2 = await receiver({ fetch: httpJwks });
+    await assert.rejects(r2.discover(), (e) => e.code === 'insecure_endpoint');
+    await assert.rejects(new SSFReceiver({ transmitterIssuer: 'http://op.test' }).discover(), (e) => e.code === 'insecure_endpoint');
+  });
+
+  it('refuses a SET with more than one event, and a stream event about another stream', async () => {
+    const r = await receiver();
+    await r.start();
+    const s = stream(r);
+    const two = await signSet(s, { iat: Math.floor(Date.now() / 1000), sub_id: alice(),
+      events: { [CAEP.SESSION_REVOKED]: {}, [CAEP.CREDENTIAL_CHANGE]: { credential_type: 'password', change_type: 'update' } } });
+    await assert.rejects(r.receiveSet(two), /exactly one event/);
+    const otherStream = await signSet(s, { iat: Math.floor(Date.now() / 1000), sub_id: { format: 'opaque', id: 'another-stream' },
+      events: { [SSF.STREAM_UPDATED]: { status: 'disabled' } } });
+    await assert.rejects(r.receiveSet(otherStream), /not about this stream/);
+    assert.equal(r.stream.status, 'enabled');
+    const notOpaque = await signSet(s, { iat: Math.floor(Date.now() / 1000), sub_id: alice(), events: { [SSF.VERIFICATION]: { state: 'x' } } });
+    await assert.rejects(r.receiveSet(notOpaque), /not about this stream/);
+    await r.stop();
   });
 
   it('validates SETs: signature, audience, typ, age, replay', async () => {
@@ -978,14 +1129,153 @@ describe('SSF / CAEP receiver (poll)', () => {
 
 describe('subjectMatches', () => {
   it('matches the RFC 9493 formats', () => {
-    const id = { iss: 'https://op', sub: 'u1', email: 'A@x.com', sid: 's9' };
+    const id = { iss: 'https://op', sub: 'u1', email: 'A@x.com', email_verified: true, sid: 's9' };
     assert.ok(subjectMatches(Subject.issSub('https://op', 'u1'), id));
     assert.ok(!subjectMatches(Subject.issSub('https://other', 'u1'), id));
     assert.ok(subjectMatches(Subject.email('a@X.com'), id));
-    assert.ok(subjectMatches(Subject.opaque('s9'), id));
+    assert.ok(subjectMatches(Subject.opaque('u1'), id));
     assert.ok(subjectMatches(Subject.aliases(Subject.email('no@x'), Subject.issSub('https://op', 'u1')), id));
     assert.ok(subjectMatches(Subject.complex({ user: Subject.issSub('https://op', 'u1'), session: Subject.opaque('s9') }), id));
     assert.ok(!subjectMatches(Subject.complex({ user: Subject.issSub('https://op', 'u1'), session: Subject.opaque('s1') }), id));
+  });
+
+  it('refuses subjects that could name somebody else', () => {
+    const id = { iss: 'https://op', sub: 'u1', email: 'a@x.com', phone_number: '+15550100', sid: 's9' };
+    // An email or phone number the OP did not verify identifies nobody (OIDC Core §5.7).
+    assert.ok(!subjectMatches(Subject.email('a@x.com'), id));
+    assert.ok(!subjectMatches(Subject.phone('+15550100'), id));
+    assert.ok(!subjectMatches(Subject.account('acct:a@x.com'), id));
+    assert.ok(subjectMatches(Subject.phone('+15550100'), { ...id, phone_number_verified: true }));
+    // A session-scoped event matches only an identity holding that session.
+    const sessionEvent = Subject.complex({ user: Subject.issSub('https://op', 'u1'), session: Subject.opaque('s9') });
+    assert.ok(!subjectMatches(sessionEvent, { ...id, sid: undefined }));
+    // An opaque id must be a string, and a top-level one is a subject, not a session.
+    assert.ok(!subjectMatches({ format: 'opaque' }, { sub: 'u1' }));
+    assert.ok(!subjectMatches({ format: 'opaque' }, { iss: 'https://op', sub: undefined }));
+    assert.ok(!subjectMatches(Subject.opaque('s9'), id));
+    assert.ok(!subjectMatches(Subject.complex({ user: Subject.issSub('https://op', 'u1'), session: { format: 'opaque' } }), id));
+  });
+});
+
+describe('security review fixes (client)', () => {
+  // Rewrites one endpoint's JSON answer.
+  const rewrite = (path, change) => async (input, init) => {
+    const res = await op.fetch(input, init);
+    if (new URL(String(input)).pathname !== path || !res.ok) return res;
+    const body = change(await res.json());
+    return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status: res.status, headers: { 'content-type': 'application/json' } });
+  };
+
+  it('refuses a refreshed ID token whose aud or azp changed (OIDC Core §12.2)', async () => {
+    let swap = false;
+    const fetch = async (input, init) => {
+      const res = await op.fetch(input, init);
+      if (!swap || !String(input).endsWith('/token')) return res;
+      const body = await res.json();
+      body.id_token = await new SignJWT({ sub: 'alice', azp: op.clientId, auth_time: Math.floor(Date.now() / 1000),
+        at_hash: createHash('sha256').update(body.access_token).digest().subarray(0, 16).toString('base64url') })
+        .setProtectedHeader({ alg: 'RS256', kid: 'k1' }).setIssuer(op.issuer).setAudience([op.clientId, 'another-api'])
+        .setIssuedAt().setExpirationTime('5m').sign(op.privateKey);
+      return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+    };
+    const client = await newClient({ fetch });
+    const tokens = await signIn(client);
+    swap = true;
+    await assert.rejects(client.refresh(tokens), (e) => e.code === 'invalid_id_token' && /(azp|aud) changed/.test(e.message));
+  });
+
+  it('refuses an ID token from a refresh with no previous claims to hold it to', async () => {
+    const client = await newClient();
+    const tokens = await signIn(client);
+    await assert.rejects(client.refresh(tokens.refresh_token), (e) => e.code === 'invalid_id_token' && /previousClaims/.test(e.message));
+    const again = await signIn(client);
+    assert.equal((await client.refresh(again.refresh_token, { previousClaims: again.claims })).claims.sub, 'alice');
+  });
+
+  it('refuses a Bearer token when DPoP is on, and never refreshes DPoP-bound tokens into Bearer ones', async () => {
+    let downgrade = false;
+    const fetch = rewrite('/token', (b) => (downgrade ? { ...b, token_type: 'Bearer' } : b));
+    const client = await newClient({ dpop: true, fetch });
+    const tokens = await signIn(client);
+    downgrade = true;
+    await assert.rejects(client.refresh(tokens), (e) => e.code === 'dpop_downgrade');
+    await assert.rejects(signIn(client), (e) => e.code === 'dpop_downgrade');
+    const lenient = await newClient({ dpop: true, requireDpop: false, fetch });
+    const signedIn = await signIn(lenient);
+    assert.equal(signedIn.token_type, 'Bearer');
+  });
+
+  it('checks the UserInfo sub against the ID token by default, and refuses a non-object answer', async () => {
+    let mode = 'other';
+    const fetch = rewrite('/userinfo', (b) => (mode === 'other' ? { ...b, sub: 'mallory' } : 'null'));
+    const client = await newClient({ fetch });
+    const tokens = await signIn(client);
+    await assert.rejects(client.userinfo(tokens), (e) => e.code === 'sub_mismatch');
+    await assert.rejects(client.userinfo(tokens.access_token), (e) => e.code === 'sub_mismatch' && /expectedSub/.test(e.message));
+    mode = 'null';
+    await assert.rejects(client.userinfo(tokens), (e) => e.code === 'invalid_userinfo');
+  });
+
+  it('requires TLS for registration, registration management and a per-request logout redirect', async () => {
+    await assert.rejects(registerClient({ registration_endpoint: 'http://op.example/register' }, { redirect_uris: [REDIRECT] }),
+      (e) => e.code === 'insecure_endpoint');
+    const { readClientRegistration } = await import('../src/index.js');
+    await assert.rejects(readClientRegistration({ registration_client_uri: 'http://op.example/reg/1', registration_access_token: 'rat' }),
+      (e) => e.code === 'insecure_endpoint');
+    const client = await newClient();
+    await assert.rejects(client.createEndSessionRequest({ postLogoutRedirectUri: 'http://evil.example/' }), (e) => e.code === 'insecure_redirect_uri');
+  });
+
+  it('builds a TokenSet without letting the response set its prototype, claims or expiry', async () => {
+    const { TokenSet } = await import('../src/index.js');
+    const ts = new TokenSet(JSON.parse('{"access_token":"a","token_type":"Bearer","__proto__":{"polluted":true},"claims":{"sub":"evil"},"expires_in":60}'));
+    assert.ok(ts instanceof TokenSet);
+    assert.equal(typeof ts.isExpired, 'function');
+    assert.equal(ts.polluted, undefined);
+    assert.equal(ts.claims, undefined);
+    const client = await newClient({ fetch: rewrite('/token', (b) => ({ ...b, expires_at: 1, issued_at: 1 })) });
+    const tokens = await signIn(client);
+    assert.ok(tokens.expires_at > Math.floor(Date.now() / 1000), 'expires_at comes from expires_in, not the response');
+  });
+
+  it('keeps AccountManager tokens in memory without DPoP, and warns about a persistent store without it', async () => {
+    const warnings = [];
+    const original = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      const storage = new Map();
+      const fakeStorage = { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v), removeItem: (k) => storage.delete(k),
+        key: (i) => [...storage.keys()][i] ?? null, get length() { return storage.size; } };
+      const { WebStorageTokenStore } = await import('../src/index.js');
+      new AccountManager(await newClient(), { store: new WebStorageTokenStore({ storage: fakeStorage }), broadcast: false });
+      assert.equal(warnings.length, 1);
+      new AccountManager(await newClient({ dpop: true }), { store: new WebStorageTokenStore({ storage: fakeStorage }), broadcast: false });
+      new AccountManager(await newClient(), { store: new MemoryTokenStore(), broadcast: false });
+      assert.equal(warnings.length, 1);
+    } finally {
+      console.warn = original;
+    }
+  });
+
+  it('a delete waits for a refresh in flight, so the refresh cannot write the tokens back', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let hold = false;
+    const fetch = async (input, init) => {
+      if (hold && String(input).endsWith('/token')) await gate;
+      return op.fetch(input, init);
+    };
+    const client = await newClient({ fetch });
+    const tm = new TokenManager(client, { autoRefresh: false });
+    await tm.set('u', await signIn(client), { schedule: false });
+    hold = true;
+    const refreshing = tm.refresh('u').catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    const deleting = tm.delete('u');
+    release();
+    await Promise.all([refreshing, deleting]);
+    assert.equal(await tm.get('u'), undefined);
+    tm.close();
   });
 });
 

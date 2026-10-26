@@ -4,7 +4,7 @@ import { discoverSSFTransmitter } from '../discovery.js';
 import { OAuthError, SETValidationError, SSFError } from '../errors.js';
 import { httpRequest, readJson } from '../http.js';
 import { wantsDpopNonce } from '../dpop.js';
-import { randomToken } from '../util.js';
+import { isSecureUrl, randomToken } from '../util.js';
 import { CAEP, DELIVERY, eventName, SSF } from './constants.js';
 
 
@@ -50,13 +50,19 @@ const NAMED_HANDLERS = {
  */
 
 /**
- * The default `onEventReceived` hook: prints one line per accepted event to the console.
+ * The default `onEventReceived` hook: prints one line per accepted event to the console, naming the
+ * event and its `jti` only. The payload and subject can carry personal data (email, phone, session id,
+ * IP address), and a console is read by extensions and error reporters, so they are left out.
  * Call it from your own hook to keep the line.
  * @type {SecurityEventHandler}
  */
 export function logEventReceived(event) {
-  console.log(`[oidc-caep-client] CAEP event received: ${event.name} (jti ${event.jti})`, event);
+  console.log(`[oidc-caep-client] CAEP event received: ${event.name} (jti ${event.jti})`);
 }
+
+/** SSF transmitter metadata members that are URLs, all of which must use TLS. */
+const SSF_URL_MEMBERS = ['jwks_uri', 'configuration_endpoint', 'status_endpoint', 'add_subject_endpoint',
+  'remove_subject_endpoint', 'verification_endpoint'];
 
 /**
  * @typedef {object} SSFReceiverConfig
@@ -74,7 +80,17 @@ export function logEventReceived(event) {
  * @property {number} [pollIntervalMs]  Default 5000.
  * @property {number} [maxEvents]       Max SETs per poll. Default 25.
  * @property {number} [clockToleranceSec] Default 60.
- * @property {number} [maxSetAgeSec]    Reject SETs whose `iat` is older than this (seconds). Default 3600; 0 disables.
+ * @property {number} [maxSetAgeSec]    Reject SETs whose `iat` is older than this (seconds). Default 0: no limit.
+ *           A polled SET waits at the transmitter until it is read, so an age limit would throw away the
+ *           signals a stopped receiver catches up on. A replay is caught by its `jti` whatever its age.
+ * @property {number} [maxDeliveryAttempts] How many times a SET is left for redelivery when its handlers
+ *           throw, or when it can't be checked for a reason that may pass (a network error, a signing key
+ *           not yet in the JWKS). After that it is acknowledged (handler failure) or reported to the
+ *           transmitter as an error (validation). Default 5.
+ * @property {boolean} [allowInsecureRequests] Allow non-TLS SSF URLs other than loopback. Default false.
+ * @property {string[]} [trustedPollOrigins] Origins besides the transmitter's issuer and
+ *           configuration_endpoint that the stream's poll endpoint_url may be at. The poll request carries
+ *           the person's access token, so it is refused anywhere else.
  * @property {boolean} [requireTyp]     Require the `typ: secevent+jwt` header (SSF §4.1.9). Default true.
  * @property {number} [jtiCacheSize]    Replay-protection window size. Default 10000.
  * @property {number} [httpTimeoutMs]
@@ -113,6 +129,7 @@ export class SSFReceiver {
   #polling = false;
   #pendingAcks = [];
   #pendingErrs = {};
+  #attempts = new Map();
 
   /** @param {SSFReceiverConfig} config */
   constructor(config) {
@@ -122,7 +139,9 @@ export class SSFReceiver {
       pollIntervalMs: 5000,
       maxEvents: 25,
       clockToleranceSec: 60,
-      maxSetAgeSec: 3600,
+      maxSetAgeSec: 0,
+      maxDeliveryAttempts: 5,
+      allowInsecureRequests: false,
       requireTyp: true,
       jtiCacheSize: 10_000,
       httpTimeoutMs: 10_000,
@@ -200,7 +219,20 @@ export class SSFReceiver {
   /** Loads transmitter metadata from its well-known SSF configuration endpoint. */
   async discover() {
     const c = this.#cfg;
-    this.metadata = await discoverSSFTransmitter(c.transmitterIssuer, { timeoutMs: c.httpTimeoutMs, fetch: c.fetch });
+    // TLS for every SSF URL (RFC 9700 §2.6), loopback excepted: they receive the person's access token,
+    // and the JWKS is what every SET is trusted by.
+    if (!c.allowInsecureRequests && !isSecureUrl(c.transmitterIssuer)) {
+      throw new SSFError(`transmitterIssuer must use https: ${c.transmitterIssuer}`, { code: 'insecure_endpoint' });
+    }
+    const metadata = await discoverSSFTransmitter(c.transmitterIssuer, { timeoutMs: c.httpTimeoutMs, fetch: c.fetch });
+    if (!c.allowInsecureRequests) {
+      for (const key of SSF_URL_MEMBERS) {
+        if (metadata[key] && !isSecureUrl(metadata[key])) {
+          throw new SSFError(`SSF metadata ${key} must use https: ${metadata[key]}`, { code: 'insecure_endpoint' });
+        }
+      }
+    }
+    this.metadata = metadata;
     this.#jwks = createRemoteJWKSet(new URL(this.metadata.jwks_uri), {
       timeoutDuration: c.httpTimeoutMs,
       ...(c.fetch ? { [customFetch]: c.fetch } : {}),
@@ -250,6 +282,7 @@ export class SSFReceiver {
   async stop({ deleteStream = false } = {}) {
     this.#polling = false;
     clearTimeout(this.#pollTimer);
+    await this.#flushAcks();
     if (deleteStream && this.stream?.stream_id) {
       await this.deleteStream().catch((err) => this.#emitError(err, { phase: 'stop' }));
     }
@@ -408,7 +441,7 @@ export class SSFReceiver {
     let claims;
     try {
       ({ payload: claims } = await jwtVerify(token, this.#jwks, {
-        // Bounds `iat` both ways: not older than maxSetAgeSec, not in the future (beyond clockTolerance).
+        // An age limit only when one is configured (see maxSetAgeSec); the future is checked below either way.
         ...(c.maxSetAgeSec > 0 ? { maxTokenAge: c.maxSetAgeSec } : {}),
         algorithms: ASYMMETRIC_JWS_ALGS,
         issuer: this.metadata.issuer,
@@ -420,11 +453,24 @@ export class SSFReceiver {
       throw mapJoseError(err);
     }
 
-    if (!claims.events || typeof claims.events !== 'object' || Array.isArray(claims.events) || !Object.keys(claims.events).length) {
-      throw new SETValidationError('SET "events" claim must be a non-empty object', 'invalid_request');
+    if (typeof claims.iat !== 'number' || claims.iat > Date.now() / 1000 + c.clockToleranceSec) {
+      throw new SETValidationError('SET iat is missing or in the future', 'invalid_request');
     }
-    if (this.stream?.stream_id && claims.sub_id?.format === 'opaque' && claims.events[SSF.VERIFICATION] && claims.sub_id.id !== this.stream.stream_id) {
-      throw new SETValidationError('Verification event is for a different stream', 'invalid_request');
+    if (!claims.events || typeof claims.events !== 'object' || Array.isArray(claims.events)) {
+      throw new SETValidationError('SET "events" claim must be an object', 'invalid_request');
+    }
+    // SSF 1.0 §4.1.8: the events claim contains exactly one event.
+    const types = Object.keys(claims.events);
+    if (types.length !== 1) {
+      throw new SETValidationError(`SET "events" claim must contain exactly one event, not ${types.length}`, 'invalid_request');
+    }
+    // A stream event (verification, stream-updated) is about a stream, named by an opaque sub_id. One that
+    // names another stream, or something else, is not about this one.
+    if ((types[0] === SSF.VERIFICATION || types[0] === SSF.STREAM_UPDATED) && claims.sub_id !== undefined) {
+      const ours = this.stream?.stream_id ?? c.streamId;
+      if (claims.sub_id?.format !== 'opaque' || (ours && claims.sub_id.id !== ours)) {
+        throw new SETValidationError(`${eventName(types[0])} event is not about this stream`, 'invalid_request');
+      }
     }
     if (this.#seenJtis.has(claims.jti)) return [];
     this.#rememberJti(claims.jti);
@@ -444,8 +490,7 @@ export class SSFReceiver {
    * @returns {Promise<{ received: number, moreAvailable: boolean }>}
    */
   async poll() {
-    const endpoint = this.stream?.delivery?.endpoint_url;
-    if (!endpoint) throw new SSFError('Stream has no poll endpoint_url');
+    const endpoint = this.#pollEndpoint();
     const ack = this.#pendingAcks.splice(0);
     const setErrs = this.#pendingErrs;
     this.#pendingErrs = {};
@@ -464,18 +509,94 @@ export class SSFReceiver {
       throw err;
     }
     const sets = Object.entries(result?.sets ?? {});
-    for (const [jti, token] of sets) {
-      try {
-        const events = await this.validateSet(token);
-        this.#pendingAcks.push(jti);
-        await this.#dispatchAll(events);
-      } catch (err) {
-        const code = err instanceof SETValidationError ? err.code : 'invalid_request';
-        this.#pendingErrs[jti] = { err: code, description: err.message };
-        this.#emitError(err, { phase: 'poll', jti });
-      }
-    }
+    for (const [jti, token] of sets) await this.#receivePolled(jti, token);
     return { received: sets.length, moreAvailable: !!result?.moreAvailable };
+  }
+
+  /**
+   * One polled SET. RFC 8936 §2.4: an acknowledged SET, and one reported in `setErrs`, are never sent again.
+   * So a SET is acknowledged only once its handlers have run without throwing, and reported only when it is
+   * definitely invalid. One that may pass later (a handler that threw, a network error while checking it, a
+   * signing key not yet in the JWKS) is left alone, and the transmitter sends it again, up to
+   * `maxDeliveryAttempts` times.
+   */
+  async #receivePolled(jti, token) {
+    let events;
+    try {
+      events = await this.validateSet(token);
+    } catch (err) {
+      if (err.retryable && this.#attempt(jti) < this.#cfg.maxDeliveryAttempts) {
+        this.#emitError(err, { phase: 'poll', jti, willRetry: true });
+        return;
+      }
+      this.#attempts.delete(jti);
+      const code = err instanceof SETValidationError ? err.code : 'invalid_request';
+      this.#pendingErrs[jti] = { err: code, description: err.message };
+      this.#emitError(err, { phase: 'poll', jti });
+      return;
+    }
+    const handled = await this.#dispatchAll(events);
+    if (!handled && this.#attempt(jti) < this.#cfg.maxDeliveryAttempts) {
+      // Let the redelivery through the replay check: it is the same SET, not handled yet.
+      for (const evt of events) this.#seenJtis.delete(evt.jti);
+      return;
+    }
+    if (!handled) {
+      this.#emitError(new SSFError(`Gave up on SET ${jti} after ${this.#cfg.maxDeliveryAttempts} attempts; its handlers kept throwing`,
+        { code: 'handler_failed' }), { phase: 'handler', jti });
+    }
+    this.#attempts.delete(jti);
+    this.#pendingAcks.push(jti);
+  }
+
+  /** Counts one more attempt at a SET, returning the count. Bounded like the jti cache. */
+  #attempt(jti) {
+    const n = (this.#attempts.get(jti) ?? 0) + 1;
+    this.#attempts.set(jti, n);
+    if (this.#attempts.size > this.#cfg.jtiCacheSize) this.#attempts.delete(this.#attempts.keys().next().value);
+    return n;
+  }
+
+  /**
+   * The poll endpoint, which receives the person's access token on every request. It comes from the stream
+   * configuration, not the transmitter's metadata, so it must use TLS and share an origin with the
+   * transmitter's own endpoints: a stream re-pointed elsewhere must not be handed the token.
+   */
+  #pollEndpoint() {
+    const endpoint = this.stream?.delivery?.endpoint_url;
+    if (!endpoint) throw new SSFError('Stream has no poll endpoint_url');
+    if (!this.#cfg.allowInsecureRequests && !isSecureUrl(endpoint)) {
+      throw new SSFError(`Poll endpoint_url must use https: ${endpoint}`, { code: 'insecure_endpoint' });
+    }
+    const origin = new URL(endpoint).origin;
+    const trusted = [this.metadata?.issuer, this.metadata?.configuration_endpoint, ...(this.#cfg.trustedPollOrigins ?? [])]
+      .filter(Boolean).map((u) => new URL(u).origin);
+    if (!trusted.includes(origin)) {
+      throw new SSFError(`Poll endpoint_url ${endpoint} is not at the transmitter's origin (${trusted.join(', ')}); not sending the access token there`,
+        { code: 'untrusted_endpoint' });
+    }
+    return endpoint;
+  }
+
+  /** Sends the acknowledgements and errors still owed, so a stopped receiver is not sent them again. */
+  async #flushAcks() {
+    if (!this.#pendingAcks.length && !Object.keys(this.#pendingErrs).length) return;
+    if (!this.stream?.delivery?.endpoint_url || !this.metadata) return;
+    const ack = this.#pendingAcks.splice(0);
+    const setErrs = this.#pendingErrs;
+    this.#pendingErrs = {};
+    try {
+      await this.#mgmt('POST', this.#pollEndpoint(), {
+        maxEvents: 0,
+        returnImmediately: true,
+        ack,
+        ...(Object.keys(setErrs).length ? { setErrs } : {}),
+      });
+    } catch (err) {
+      this.#pendingAcks.unshift(...ack);
+      Object.assign(this.#pendingErrs, setErrs);
+      this.#emitError(err, { phase: 'stop' });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -506,8 +627,11 @@ export class SSFReceiver {
     }
   }
 
+  /** @returns {Promise<boolean>} false when a handler threw */
   async #dispatchAll(events) {
-    for (const evt of events) await this.#dispatch(evt);
+    let ok = true;
+    for (const evt of events) ok = (await this.#dispatch(evt)) && ok;
+    return ok;
   }
 
   async #dispatch(evt) {
@@ -515,6 +639,7 @@ export class SSFReceiver {
       this.#pendingVerifications.get(evt.payload.state)?.(evt);
       this.#pendingVerifications.delete(evt.payload.state);
     }
+    // validateSet() refused a stream event that names another stream; one with no sub_id is the stream's.
     if (evt.type === SSF.STREAM_UPDATED && this.stream) {
       this.stream = { ...this.stream, status: evt.payload.status };
     }
@@ -527,17 +652,24 @@ export class SSFReceiver {
     }
     const specific = this.#handlers.get(evt.type);
     const handlers = specific?.size ? [...specific] : [...this.#unhandledHandlers];
+    let ok = true;
     for (const h of [...handlers, ...this.#anyHandlers]) {
       try {
         await h(evt);
       } catch (err) {
+        ok = false;
         this.#emitError(err, { phase: 'handler', event: evt });
       }
     }
+    return ok;
   }
 
   #emitError(err, context) {
-    if (!this.#errorHandlers.size) return;
+    if (!this.#errorHandlers.size) {
+      // Never silent: a security event that could not be handled must leave a trace.
+      console.error(`[oidc-caep-client] ${context?.phase ?? 'error'}: ${err?.message ?? err}`);
+      return;
+    }
     for (const h of this.#errorHandlers) {
       try {
         h(err, context);
@@ -619,7 +751,21 @@ function toSecurityEvent(type, payload, set, raw) {
   };
 }
 
+/** jose errors that say the SET itself is bad. Anything else (fetching the JWKS, a key it doesn't hold yet) may pass. */
+const DEFINITE_JOSE_ERRORS = [joseErrors.JWTClaimValidationFailed, joseErrors.JWTExpired, joseErrors.JWSSignatureVerificationFailed,
+  joseErrors.JOSEAlgNotAllowed, joseErrors.JWSInvalid, joseErrors.JWTInvalid, joseErrors.JOSENotSupported];
+
 function mapJoseError(err) {
+  const mapped = mapDefiniteJoseError(err);
+  if (mapped) return mapped;
+  // A network error or timeout fetching the JWKS, a JWKS that couldn't be read, or a kid it doesn't hold yet
+  // (a rotation the cached set hasn't caught up with): the SET may verify on a later attempt.
+  const code = err instanceof joseErrors.JWKSNoMatchingKey ? 'invalid_key' : 'invalid_request';
+  return Object.assign(new SETValidationError(err?.message ?? String(err), code, err), { retryable: true });
+}
+
+function mapDefiniteJoseError(err) {
+  if (!DEFINITE_JOSE_ERRORS.some((E) => err instanceof E)) return undefined;
   if (err instanceof joseErrors.JWTExpired && err.claim === 'iat') {
     return new SETValidationError(`SET is too old: ${err.message}`, 'invalid_request', err);
   }
@@ -629,7 +775,7 @@ function mapJoseError(err) {
     if (err.claim === 'aud') return new SETValidationError(err.message, 'invalid_audience', err);
     return new SETValidationError(err.message, 'invalid_request', err);
   }
-  if (err instanceof joseErrors.JWSSignatureVerificationFailed || err instanceof joseErrors.JWKSNoMatchingKey || err instanceof joseErrors.JOSEAlgNotAllowed) {
+  if (err instanceof joseErrors.JWSSignatureVerificationFailed || err instanceof joseErrors.JOSEAlgNotAllowed) {
     return new SETValidationError(err.message, 'invalid_key', err);
   }
   return new SETValidationError(err.message ?? String(err), 'invalid_request', err);

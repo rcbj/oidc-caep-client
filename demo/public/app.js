@@ -36,7 +36,6 @@ const CLIENT_DEFAULTS = {
   caep: {
     enabled: true,
     transmitterIssuer: '',
-    maxSetAgeSec: 3600,
     subjectFormat: 'iss_sub',
     onlyUser: true,
   },
@@ -377,7 +376,6 @@ function makeReceiver(account, getTokenSet, streamId) {
     eventsRequested: eventUris(selectedEvents()),
     description: `oidc-caep-client in-browser demo @ ${ORIGIN} (${labelOf(account)})`,
     pollIntervalMs: 5000,
-    maxSetAgeSec: c.maxSetAgeSec,
     handlers: handlersFor(account.key, getTokenSet),
   });
 }
