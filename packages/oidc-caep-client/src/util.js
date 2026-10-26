@@ -53,17 +53,20 @@ export function isSecureUrl(value) {
 export class Emitter {
   #listeners = new Map();
 
+  /** @param {string} event @param {(...args: any[]) => void} fn @returns {this} */
   on(event, fn) {
     if (!this.#listeners.has(event)) this.#listeners.set(event, new Set());
     this.#listeners.get(event).add(fn);
     return this;
   }
 
+  /** @param {string} event @param {(...args: any[]) => void} fn @returns {this} */
   off(event, fn) {
     this.#listeners.get(event)?.delete(fn);
     return this;
   }
 
+  /** @param {string} event @param {(...args: any[]) => void} fn @returns {this} */
   once(event, fn) {
     const wrapped = (...args) => {
       this.off(event, wrapped);
@@ -72,6 +75,7 @@ export class Emitter {
     return this.on(event, wrapped);
   }
 
+  /** @param {string} event @param {...any} args @returns {boolean} */
   emit(event, ...args) {
     const set = this.#listeners.get(event);
     if (!set?.size) return false;

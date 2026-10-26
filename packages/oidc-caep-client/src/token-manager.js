@@ -55,21 +55,31 @@ export class TokenManager extends Emitter {
     return ts;
   }
 
-  /** Schedules the proactive refresh of the tokens already stored for key. */
+  /**
+   * Schedules the proactive refresh of the tokens already stored for key.
+   * @param {string} key
+   * @returns {Promise<void>}
+   */
   async schedule(key) {
     this.#wanted.add(key);
     const ts = await this.get(key);
     if (ts) this.#schedule(key, ts);
   }
 
-  /** Stops refreshing key's tokens in the background; they stay stored. */
+  /**
+   * Stops refreshing key's tokens in the background; they stay stored.
+   * @param {string} key
+   */
   unschedule(key) {
     this.#wanted.delete(key);
     clearTimeout(this.#timers.get(key));
     this.#timers.delete(key);
   }
 
-  /** @returns {Promise<TokenSet|undefined>} Cached tokens (possibly expired) for key. */
+  /**
+   * @param {string} key
+   * @returns {Promise<TokenSet|undefined>} Cached tokens (possibly expired) for key.
+   */
   async get(key) {
     const raw = await this.#store.get(key);
     return raw ? TokenSet.from(raw) : undefined;
@@ -87,6 +97,7 @@ export class TokenManager extends Emitter {
 
   /**
    * Refreshes tokens for key now. Concurrent calls share a single request.
+   * @param {string} key
    * @returns {Promise<TokenSet>}
    */
   refresh(key) {

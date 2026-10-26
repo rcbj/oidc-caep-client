@@ -5,6 +5,22 @@ import { base64url, digest } from './util.js';
 export const DPOP_ALGS = Object.freeze(['ES256', 'ES384', 'PS256', 'RS256']);
 
 /**
+ * Where a DPoP key pair is kept between page loads. `extractable: true` says the store can only hold an
+ * extractable key (Web Storage holds strings), so `DPoPKey.loadOrCreate` generates one.
+ * @typedef {object} KeyStore
+ * @property {() => Promise<StoredKey|undefined>} get
+ * @property {(value: StoredKey) => Promise<void>} set
+ * @property {() => Promise<void>} delete
+ * @property {boolean} [extractable]
+ */
+
+/**
+ * @typedef {object} StoredKey
+ * @property {string} alg
+ * @property {CryptoKeyPair} keyPair
+ */
+
+/**
  * A DPoP key pair (RFC 9449) and the proofs made with it.
  *
  * The private key is generated NON-EXTRACTABLE: script running in the page (including injected script)
@@ -22,6 +38,13 @@ export class DPoPKey {
   /** @type {string} RFC 7638 SHA-256 thumbprint of the public key (the `jkt`). */
   thumbprint;
 
+  /**
+   * Use `DPoPKey.create()` or `DPoPKey.loadOrCreate()` rather than this.
+   * @param {string} alg
+   * @param {CryptoKey} privateKey
+   * @param {Record<string, string>} publicJwk
+   * @param {string} thumbprint
+   */
   constructor(alg, privateKey, publicJwk, thumbprint) {
     this.alg = alg;
     this.#privateKey = privateKey;
@@ -72,7 +95,11 @@ export class DPoPKey {
   }
 }
 
-/** The `htu` of a request: its URL without query and fragment (RFC 9449 §4.2). */
+/**
+ * The `htu` of a request: its URL without query and fragment (RFC 9449 §4.2).
+ * @param {string|URL} url
+ * @returns {string}
+ */
 export function htuOf(url) {
   const u = new URL(url);
   u.search = '';
@@ -84,11 +111,20 @@ export function htuOf(url) {
 export class DPoPNonceCache {
   #nonces = new Map();
 
+  /**
+   * @param {string|URL} url
+   * @returns {string|undefined}
+   */
   get(url) {
     return this.#nonces.get(new URL(url).origin);
   }
 
-  /** Records the nonce a response carries, if any, and returns it. */
+  /**
+   * Records the nonce a response carries, if any, and returns it.
+   * @param {string|URL} url
+   * @param {Response} response
+   * @returns {string|undefined}
+   */
   update(url, response) {
     const nonce = response?.headers?.get?.('dpop-nonce');
     if (nonce) this.#nonces.set(new URL(url).origin, nonce);
@@ -96,7 +132,11 @@ export class DPoPNonceCache {
   }
 }
 
-/** Whether a resource server's 401 asks for a (new) DPoP nonce (RFC 9449 §9). */
+/**
+ * Whether a resource server's 401 asks for a (new) DPoP nonce (RFC 9449 §9).
+ * @param {Response} response
+ * @returns {boolean}
+ */
 export function wantsDpopNonce(response) {
   if (response.status !== 401) return false;
   const www = response.headers.get('www-authenticate') ?? '';
@@ -140,8 +180,11 @@ export class IndexedDBKeyStore {
     }
   }
 
+  /** @returns {Promise<StoredKey|undefined>} */
   get() { return this.#tx('readonly', (s) => s.get(this.#key)); }
+  /** @param {StoredKey} value @returns {Promise<void>} */
   set(value) { return this.#tx('readwrite', (s) => s.put(value, this.#key)); }
+  /** @returns {Promise<void>} */
   delete() { return this.#tx('readwrite', (s) => s.delete(this.#key)); }
 }
 
@@ -163,6 +206,7 @@ export class WebStorageKeyStore {
     this.#key = key;
   }
 
+  /** @returns {Promise<StoredKey|undefined>} */
   async get() {
     const raw = this.#storage.getItem(this.#key);
     if (!raw) return undefined;
@@ -172,9 +216,11 @@ export class WebStorageKeyStore {
       importJWK(saved.privateJwk, saved.alg, { extractable: true }),
       importJWK(saved.publicJwk, saved.alg),
     ]);
-    return { alg: saved.alg, keyPair: { privateKey, publicKey } };
+    // An asymmetric JWK always imports as a CryptoKey (only "oct" keys import as bytes).
+    return { alg: saved.alg, keyPair: { privateKey: /** @type {CryptoKey} */ (privateKey), publicKey: /** @type {CryptoKey} */ (publicKey) } };
   }
 
+  /** @param {StoredKey} value @returns {Promise<void>} */
   async set(value) {
     const privateKey = value?.keyPair?.privateKey;
     if (!privateKey?.extractable) {
@@ -195,7 +241,9 @@ export class WebStorageKeyStore {
 /** Keeps a DPoP key in memory only (a new key after every page load). */
 export class MemoryKeyStore {
   #value;
+  /** @returns {Promise<StoredKey|undefined>} */
   async get() { return this.#value; }
+  /** @param {StoredKey} value */
   async set(value) { this.#value = value; }
   async delete() { this.#value = undefined; }
 }

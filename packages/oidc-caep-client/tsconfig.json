@@ -1,0 +1,19 @@
+{
+  // Generates the TypeScript declarations (types/*.d.ts) from the JSDoc in src/. The library stays
+  // JavaScript; TypeScript users get these through package.json's "types" and "exports".
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": "src",
+    "outDir": "types",
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "skipLibCheck": true,
+    "stripInternal": true
+  },
+  "include": ["src/**/*.js"]
+}

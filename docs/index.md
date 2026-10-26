@@ -29,6 +29,8 @@ That adds the package to your `package.json`:
 }
 ```
 
+It works from JavaScript and TypeScript: the package ships type declarations, so `import { SSFReceiver, type SecurityEvent } from 'oidc-caep-client'` is typed with no extra setup.
+
 Versions are `M.N.O`, with `O` the UTC build time, so `^0.1.0` takes every later 0.1 build; `npm install oidc-caep-client@next` gets the one built from `develop`. [Installing](reference.md#installing) in the reference covers pinning a version and loading the package with or without a bundler.
 
 ## Where to read
