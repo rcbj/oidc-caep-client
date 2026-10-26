@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
+# SPDX-License-Identifier: MIT
+#
+# Runs the library's test suite, then builds the demo app's container and checks that it serves
+# what a browser needs.
+#
+#   test    `npm test` (node:test against the strict in-memory OP and SSF transmitter in
+#           packages/oidc-caep-client/test) on every Node version package.json's engines allow,
+#           and the check that the committed package.json versions follow VERSION.
+#   demo    builds the image from the repo-root Dockerfile, starts it, waits for its health check,
+#           and requests the pages and modules the SPA loads. It also checks the security headers
+#           (the CSP and its import-map hash, Referrer-Policy, framing), so a change that breaks
+#           them fails here rather than as a blank page in somebody's browser.
+#
+# Nothing is pushed: the image is built for this run only. Publishing the library is
+# npm-publish.yml's job.
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request supersedes a run still going.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Library tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lowest version engines allow, the Dockerfile's, and iya-sts's pin.
+        node: ['20', '22', '24.22.1']
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Check the manifests follow VERSION
+        run: node scripts/version.mjs --check-manifests
+
+  demo:
+    name: Demo container
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: oidc-caep-demo:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start the container
+        run: |
+          docker run -d --name caep-demo -p 3000:3000 -e PUBLIC_URL=http://localhost:3000 oidc-caep-demo:ci
+          for i in $(seq 1 30); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' caep-demo)"
+            [ "$status" = healthy ] && { echo "healthy after ${i}s"; exit 0; }
+            [ "$(docker inspect -f '{{.State.Running}}' caep-demo)" = true ] || break
+            sleep 1
+          done
+          echo "The container did not become healthy (status: ${status:-unknown})." >&2
+          docker logs caep-demo >&2
+          exit 1
+
+      - name: Smoke-test what the browser loads
+        run: |
+          set -euo pipefail
+          BASE=http://localhost:3000
+          fail() { echo "FAIL: $*" >&2; exit 1; }
+
+          # The page, at / and at the redirect URI.
+          for path in / /callback; do
+            code="$(curl -s -o /tmp/page.html -w '%{http_code}' "${BASE}${path}")"
+            [ "$code" = 200 ] || fail "GET ${path} answered ${code}"
+            grep -q '<script type="importmap">' /tmp/page.html || fail "GET ${path} has no import map"
+          done
+
+          # The headers a browser-based OAuth client needs (see demo/server.js).
+          curl -s -D /tmp/headers -o /tmp/page.html "${BASE}/"
+          header() { grep -i "^$1:" /tmp/headers | head -1 | cut -d' ' -f2- | tr -d '\r'; }
+          csp="$(header Content-Security-Policy)"
+          echo "CSP: ${csp}"
+          echo "${csp}" | grep -q "frame-ancestors 'none'" || fail "CSP lacks frame-ancestors 'none'"
+          echo "${csp}" | grep -q "default-src 'none'" || fail "CSP lacks default-src 'none'"
+          if echo "${csp}" | grep -qE "unsafe-inline|unsafe-eval"; then fail "CSP allows inline script or eval"; fi
+          [ "$(header Referrer-Policy)" = no-referrer ] || fail "Referrer-Policy is not no-referrer"
+          [ "$(header X-Frame-Options)" = DENY ] || fail "X-Frame-Options is not DENY"
+          [ "$(header Cache-Control)" = no-store ] || fail "the page is cacheable"
+
+          # The CSP must allow the inline import map by its hash, or the page loads no script at all.
+          map="$(sed -n 's/.*<script type="importmap">\(.*\)<\/script>.*/\1/p' /tmp/page.html)"
+          hash="sha256-$(printf '%s' "${map}" | openssl dgst -sha256 -binary | base64)"
+          echo "${csp}" | grep -qF "'${hash}'" || fail "CSP does not carry the import map's hash ${hash}"
+
+          # The configuration file and the modules the import map names.
+          curl -sf "${BASE}/oidc.json" | jq -e '.metadataUrl and .client_id and .scopes' >/dev/null || fail "/oidc.json is incomplete"
+          for path in /lib/index.js /lib/caep/ssf-receiver.js /vendor/jose/index.js /app.js /styles.css; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}${path}")"
+            [ "$code" = 200 ] || fail "GET ${path} answered ${code}"
+          done
+          curl -sf "${BASE}/lib/index.js" | grep -q 'SSFReceiver' || fail "/lib/index.js does not export SSFReceiver"
+          echo "Smoke test passed."
+
+      - name: Container logs
+        if: always()
+        run: docker logs caep-demo 2>&1 | tail -50 || true

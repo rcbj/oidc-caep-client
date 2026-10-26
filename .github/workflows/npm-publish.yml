@@ -1,0 +1,172 @@
+# SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
+# SPDX-License-Identifier: MIT
+#
+# Builds, tests and publishes packages/oidc-caep-client to npmjs.com.
+#
+# THE VERSION is iya-sts's scheme (scripts/version.mjs): M.N from the VERSION
+# file and a build number that is the UTC build instant, YYYYMMDDHHMMSS, so
+# every publish gets a new, increasing version (0.1.20261026170512) with no
+# version commit. The committed package.json says M.N.0; `--set` writes the
+# real number into the workspace copy just before packing.
+#
+# WHEN IT PUBLISHES, as iya-sts's build-container.yml does for images:
+#   - a push to main publishes under the npm dist-tag `latest`;
+#   - a push to develop publishes under `next`, so `npm install` never picks it
+#     up by accident;
+#   - a pull request builds, tests and packs, and publishes nothing;
+#   - Run workflow (workflow_dispatch) publishes under the dist-tag chosen.
+# Only a change to the package, VERSION, the versioner, the lock file or this
+# workflow publishes. A demo-only change doesn't release the library.
+#
+# AUTHENTICATION. The publish job can use either of two credentials:
+#   - npm trusted publishing (OIDC): no secret. Configure it on npmjs.com under
+#     the package's Settings → Trusted publishing, naming this repository and
+#     the workflow file `npm-publish.yml`, with the environment `npm`.
+#   - The repository secret NPM_TOKEN: an npm granular access token with
+#     publish rights. The very first publish needs this, because a trusted
+#     publisher can only be configured for a package that already exists. Once
+#     trusted publishing is set up, delete the secret.
+# Either way the package is published with provenance (`--provenance`): npm
+# shows which commit and workflow run built it.
+#
+# After a publish, the commit is tagged `v<version>`, so the npm version leads
+# back to the source.
+name: Publish the npm package
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - packages/oidc-caep-client/**
+      - VERSION
+      - package-lock.json
+      - scripts/version.mjs
+      - .github/workflows/npm-publish.yml
+  pull_request:
+    paths:
+      - packages/oidc-caep-client/**
+      - VERSION
+      - package-lock.json
+      - scripts/version.mjs
+      - .github/workflows/npm-publish.yml
+  workflow_dispatch:
+    inputs:
+      dist-tag:
+        description: npm dist-tag to publish under
+        type: choice
+        options: [latest, next]
+        default: latest
+
+permissions:
+  contents: read
+
+# One publish per branch at a time, and a queued one is not cancelled: each
+# carries its own build number, and dropping one would leave a gap for no reason.
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.stamp.outputs.version }}
+      tarball: ${{ steps.pack.outputs.tarball }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # iya-sts's pin: the 21 October 2026 security release.
+          node-version: '24.22.1'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      # VERSION and the committed manifests must agree before anything is built.
+      - name: Check the manifests follow VERSION
+        run: node scripts/version.mjs --check-manifests
+
+      - name: Stamp the version
+        id: stamp
+        run: |
+          VERSION="$(node scripts/version.mjs --set packages/oidc-caep-client)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "### oidc-caep-client ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Pack
+        id: pack
+        working-directory: packages/oidc-caep-client
+        run: |
+          TARBALL="$(npm pack --silent)"
+          echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
+          tar -tzf "${TARBALL}" | sed 's/^/  /'
+          # The library must import from what was packed, not from the checkout.
+          mkdir -p /tmp/smoke && cd /tmp/smoke && npm init -y >/dev/null
+          npm install --no-audit --no-fund "${GITHUB_WORKSPACE}/packages/oidc-caep-client/${TARBALL}"
+          node --input-type=module -e "import * as m from 'oidc-caep-client'; for (const n of ['OIDCClient','SSFReceiver','AccountManager','logEventReceived']) if (!m[n]) throw new Error(n + ' is not exported'); console.log('exports ok');"
+
+      - name: Upload the tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: packages/oidc-caep-client/${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # `npm` is the environment a trusted publisher names; add required reviewers
+    # to it in Settings → Environments to hold every publish for approval.
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/oidc-caep-client/v/${{ needs.build.outputs.version }}
+    permissions:
+      contents: write    # the v<version> tag
+      id-token: write    # trusted publishing and provenance
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+          registry-url: https://registry.npmjs.org
+
+      - name: Download the tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+
+      - name: Choose the dist-tag
+        id: tag
+        run: |
+          case "${GITHUB_EVENT_NAME}:${GITHUB_REF_NAME}" in
+            workflow_dispatch:*) TAG="${{ inputs.dist-tag }}" ;;
+            push:main)           TAG=latest ;;
+            *)                   TAG=next ;;
+          esac
+          echo "dist_tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        env:
+          # Empty when trusted publishing is configured instead.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish "${{ needs.build.outputs.tarball }}" \
+            --access public --provenance --tag "${{ steps.tag.outputs.dist_tag }}"
+          echo "Published oidc-caep-client@${{ needs.build.outputs.version }} as ${{ steps.tag.outputs.dist_tag }}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tag the commit
+        run: |
+          git tag "v${{ needs.build.outputs.version }}" "${GITHUB_SHA}"
+          git push origin "v${{ needs.build.outputs.version }}"
