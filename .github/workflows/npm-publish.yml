@@ -79,7 +79,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          # iya-sts's pin: the 21 October 2026 security release.
+          # The 21 October 2026 security release, fixing HTTP2Shell / Node2Shell (CVE-2026-111497); iya-sts's pin too.
           node-version: '24.22.1'
           cache: npm
 
