@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-FROM node:22-alpine
+# 24.22.1: the 21 October 2026 security release, which fixes HTTP2Shell / Node2Shell (CVE-2026-111497).
+FROM node:24.22.1-alpine
 
 ENV NODE_ENV=production
 WORKDIR /app
