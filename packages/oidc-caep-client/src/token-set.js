@@ -1,5 +1,3 @@
-import { decodeJwt } from 'jose';
-
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
@@ -32,16 +30,18 @@ export class TokenSet {
   constructor(tokens, claims) {
     const { expires_in, claims: _ignored, ...rest } = tokens;
     // Field by field rather than Object.assign: a JSON "__proto__" member would otherwise replace this
-    // object's prototype. `claims` comes only from the validated ID token (the second argument).
+    // object's prototype, and one named like a method ("isExpired", "toJSON") would shadow it. `claims`
+    // comes only from the validated ID token (the second argument).
     for (const [name, value] of Object.entries(rest)) {
-      if (!UNSAFE_KEYS.has(name)) this[name] = value;
+      if (!UNSAFE_KEYS.has(name) && !(name in TokenSet.prototype)) this[name] = value;
     }
     if (this.expires_at === undefined && expires_in !== undefined) {
       this.issued_at ??= Math.floor(Date.now() / 1000);
       this.expires_at = this.issued_at + Number(expires_in);
     }
+    // Only claims the client validated. An ID token's payload is never decoded here unverified: code
+    // that trusts `claims` (UserInfo's sub check, account keys) must not be handed claims nobody checked.
     if (claims) this.claims = claims;
-    else if (this.id_token && !this.claims) this.claims = decodeJwt(this.id_token);
   }
 
   /** @returns {number|undefined} Seconds until the access token expires. */

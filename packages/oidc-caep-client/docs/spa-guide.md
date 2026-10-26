@@ -235,6 +235,8 @@ Useful options on `createAuthorizationRequest()`:
 | `acrValues`, `maxAge` | Step-up: ask for a stronger or more recent authentication. With `enforceAcr` (the default), a returned `acr` outside `acrValues` is refused. |
 | `context` | Your own JSON data, handed back by `completeAuthorization()`. Use it, for example, to return to the page the person started from. |
 
+`extraParams` adds other parameters, such as `claims` or `ui_locales`. It can't replace the ones the client sets itself (`response_type`, `redirect_uri`, `state`, `nonce`, the PKCE and DPoP parameters, `resource`): those throw a `TypeError`.
+
 ## 7. Call your APIs
 
 ```js
@@ -397,7 +399,8 @@ Every event (a signed SET) is refused unless all of these hold:
 The receiver is careful about what it tells the transmitter, because an acknowledged event, or one reported as an error, is never sent again:
 
 - **An invalid event** goes to `onError`, is reported back to the transmitter on the next poll, and never reaches your handlers.
-- **An event that couldn't be checked** for a reason that may pass (a network error fetching the keys, a key the cached set doesn't hold yet) is left for the transmitter to send again.
+- **An event that couldn't be checked** for a reason that may pass (a network error fetching the keys, a key the cached set doesn't hold yet) is left for the transmitter to send again, for as long as that lasts.
+- **Polls never overlap,** so an event still being handled is never acknowledged by another poll.
 - **An event is acknowledged only after your handlers succeed.** If one throws, the event comes back on a later poll, up to `maxDeliveryAttempts` times (default 5). Write handlers so that running twice is harmless; a reload can also bring an event back.
 - **The poll URL** must use https and be at the transmitter's origin, because every poll carries the person's access token.
 

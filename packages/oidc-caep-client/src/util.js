@@ -80,14 +80,20 @@ export class Emitter {
     const set = this.#listeners.get(event);
     if (!set?.size) return false;
     for (const fn of [...set]) {
+      // A listener's failure, thrown or rejected, is reported and doesn't stop the others. It is not
+      // rethrown: in Node.js that would be an uncaughtException, which stops the program.
       try {
-        fn(...args);
+        Promise.resolve(fn(...args)).catch((err) => reportListenerError(event, err));
       } catch (err) {
-        queueMicrotask(() => { throw err; });
+        reportListenerError(event, err);
       }
     }
     return true;
   }
+}
+
+function reportListenerError(event, err) {
+  console.error(`[oidc-caep-client] a "${event}" listener failed: ${err?.message ?? err}`);
 }
 
 /** Resolves when `emitter` next emits `event`, with the event's arguments. */
