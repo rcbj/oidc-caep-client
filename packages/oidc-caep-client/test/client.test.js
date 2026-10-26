@@ -83,7 +83,7 @@ async function createStubProvider(opts = {}) {
       const u = new URL(url);
       if (payload.htm !== method || payload.htu !== `${u.origin}${u.pathname}`) return { error: 'invalid_dpop_proof' };
       if (accessToken && payload.ath !== b64sha(accessToken)) return { error: 'invalid_dpop_proof' };
-      if (state.requireNonce[where] && payload.nonce !== state.nonce) return { error: 'use_dpop_nonce' };
+      if (state.requireNonce[where] && payload.nonce !== nonceFor(where)) return { error: 'use_dpop_nonce' };
       return { jkt: await calculateJwkThumbprint(header.jwk, 'sha256') };
     } catch {
       return { error: 'invalid_dpop_proof' };
@@ -110,7 +110,9 @@ async function createStubProvider(opts = {}) {
     return { at };
   }
 
-  const nonceChallenge = () => new Response(null, { status: 401, headers: { 'www-authenticate': 'DPoP error="use_dpop_nonce"', 'dpop-nonce': state.nonce } });
+  // One nonce for every server, or one each (state.nonces.token / .resource), as RFC 9449 §8 and §9 allow.
+  const nonceFor = (where) => state.nonces?.[where] ?? state.nonce;
+  const nonceChallenge = () => new Response(null, { status: 401, headers: { 'www-authenticate': 'DPoP error="use_dpop_nonce"', 'dpop-nonce': nonceFor('resource') } });
 
   async function handle(url, init) {
     const u = new URL(url);
@@ -137,7 +139,7 @@ async function createStubProvider(opts = {}) {
       state.tokenCalls++;
       if (form.get('client_id') !== clientId || headers.get('authorization') || form.get('client_secret')) return json({ error: 'invalid_client' }, 401);
       const proof = await checkProof(headers.get('dpop'), 'POST', url, undefined, 'token');
-      if (proof.error === 'use_dpop_nonce') return json({ error: 'use_dpop_nonce' }, 400, { 'dpop-nonce': state.nonce });
+      if (proof.error === 'use_dpop_nonce') return json({ error: 'use_dpop_nonce' }, 400, { 'dpop-nonce': nonceFor('token') });
       if (proof.error) return json({ error: proof.error }, 400);
       state.lastToken = new URLSearchParams(form);
       const issue = (sub, scope) => {
@@ -757,6 +759,33 @@ describe('AccountManager (one token cache for the browser, one active account pe
     assert.equal(reloaded.active.status, 'tokens-missing');
   });
 
+  it('a reload while a sign-in is being recorded does not drop the new account', async () => {
+    // The shared store holds the token write of the new account until the test lets it go.
+    let release;
+    let hold = false;
+    const gate = new Promise((r) => { release = r; });
+    class SlowStore extends MemoryTokenStore {
+      async set(key, value) {
+        if (hold && key.startsWith('acct-')) await gate;
+        return super.set(key, value);
+      }
+    }
+    const accounts = await tab(await newClient(), new SlowStore());
+    const bob = await add(accounts, 'bob');
+    hold = true;
+    const { url } = await accounts.addAccount();
+    const signingIn = accounts.handleCallback(op.authorize(url, 'alice'));
+    await new Promise((r) => setTimeout(r, 20));
+    // A reload during the write: before the fix it replaced the list, and alice's record was lost.
+    const ending = accounts.end(bob.account.key, 'session-revoked');
+    release();
+    const { account } = await signingIn;
+    await ending;
+    assert.equal(account.sub, 'alice');
+    assert.deepEqual(accounts.list().map((x) => x.sub).sort(), ['alice', 'bob']);
+    assert.equal(accounts.get(bob.account.key).status, 'ended');
+  });
+
   it('holds at most maxAccounts: forgets the account that left longest ago, else refuses', async () => {
     const accounts = await tab(await newClient(), new MemoryTokenStore(), { maxAccounts: 2 });
     const a = await add(accounts, 'alice');
@@ -1105,6 +1134,101 @@ describe('SSF / CAEP receiver (poll)', () => {
     await r.stop();
   });
 
+  it('never acknowledges a SET whose handler is still running when another poll receives it', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let calls = 0;
+    const r = await receiver({ pollIntervalMs: 60_000 });
+    r.onSessionRevoked(async () => {
+      calls += 1;
+      if (calls === 1) {
+        await gate;
+        throw new Error('storage unavailable');
+      }
+    }).onError(() => {});
+    await r.start();
+    await settle();
+    const s = stream(r);
+    s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, alice()));
+    const first = r.poll();
+    await new Promise((res) => setTimeout(res, 20));
+    const second = r.poll();
+    r.pollNow();
+    // Long enough for an overlapping poll to receive j1 again while its first handling is still running.
+    await new Promise((res) => setTimeout(res, 20));
+    release();
+    await Promise.all([first, second]);
+    assert.equal(s.queue.has('j1'), true, 'not acknowledged: its handler failed');
+    await r.poll();
+    assert.equal(calls, 2, 'redelivered and handled');
+    await r.poll();
+    assert.equal(s.queue.size, 0, 'acknowledged once handled');
+    await r.stop();
+  });
+
+  it('pollNow() during a poll does not start a second poll loop', async () => {
+    let polls = 0;
+    // Each poll takes 30 ms, so the pollNow() calls below land while one is in flight.
+    const fetch = async (input, init) => {
+      if (String(input).includes('/ssf/poll/')) {
+        polls += 1;
+        await new Promise((res) => setTimeout(res, 30));
+      }
+      return op.fetch(input, init);
+    };
+    const r = await receiver({ fetch, pollIntervalMs: 100 });
+    await r.start();
+    for (let i = 0; i < 5; i++) {
+      await new Promise((res) => setTimeout(res, 10));
+      r.pollNow();
+      await new Promise((res) => setTimeout(res, 120));
+    }
+    polls = 0;
+    await new Promise((res) => setTimeout(res, 1000));
+    await r.stop();
+    // One loop: a poll every 100 ms plus 30 ms for the request, about 8 a second.
+    assert.ok(polls <= 10, `one poll loop, not ${polls} polls a second`);
+  });
+
+  it('never reports a SET it could not check for a passing reason, however many polls that takes', async () => {
+    let failJwks = 8;
+    const fetch = (input, init) => {
+      if (String(input).endsWith('/jwks') && failJwks-- > 0) return Promise.reject(new TypeError('fetch failed: network down'));
+      return op.fetch(input, init);
+    };
+    const got = [];
+    const r = await receiver({ fetch, pollIntervalMs: 60_000, maxDeliveryAttempts: 2 });
+    r.onSessionRevoked((e) => got.push(e.jti)).onError(() => {});
+    await r.start();
+    await settle();
+    const s = stream(r);
+    s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, alice()));
+    for (let i = 0; i < 8; i++) await r.poll();
+    assert.equal(s.errs, undefined, 'not reported to the transmitter');
+    assert.equal(got.length, 0);
+    await r.poll();
+    assert.equal(got.length, 1, 'handled once the keys can be fetched');
+    await r.stop();
+  });
+
+  it('catches a rejection from an async onError handler', async () => {
+    const unhandled = [];
+    const onUnhandled = (err) => unhandled.push(err);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const r = await receiver();
+      r.onSessionRevoked(() => { throw new Error('boom'); });
+      r.onError(async () => { throw new Error('error handler failed'); });
+      await r.start();
+      await r.receiveSet(await op.makeSet(stream(r), CAEP.SESSION_REVOKED, {}, alice()));
+      await new Promise((res) => setTimeout(res, 20));
+      await r.stop();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    assert.deepEqual(unhandled, []);
+  });
+
   it('validates SETs: signature, audience, typ, age, replay', async () => {
     const r = await receiver({ maxSetAgeSec: 600 });
     await r.start();
@@ -1285,6 +1409,66 @@ describe('security review fixes (client)', () => {
     await Promise.all([refreshing, deleting]);
     assert.equal(await tm.get('u'), undefined);
     tm.close();
+  });
+});
+
+describe('second security review fixes (client)', () => {
+  it('refuses extraParams that would replace the parameters the client sets, and passes others through', async () => {
+    const client = await newClient({ dpop: true });
+    for (const name of ['response_type', 'code_challenge_method', 'redirect_uri', 'state', 'dpop_jkt']) {
+      await assert.rejects(client.createAuthorizationRequest({ extraParams: { [name]: 'x' } }), (e) => e instanceof TypeError && e.message.includes(name));
+    }
+    const claims = JSON.stringify({ id_token: { email: null } });
+    await client.createAuthorizationRequest({ extraParams: { claims } });
+    assert.equal(op.state.par.size ? [...op.state.par.values()].pop().get('claims') : op.state.lastAuthorize?.get('claims'), claims);
+  });
+
+  it('keeps TokenSet methods whatever the response contains, and never decodes an unverified ID token', async () => {
+    const { TokenSet } = await import('../src/index.js');
+    const ts = new TokenSet({ access_token: 'a', token_type: 'Bearer', expires_in: 60, isExpired: true, toJSON: 'x', expiresIn: 1 });
+    assert.equal(ts.isExpired(), false);
+    assert.equal(typeof ts.toJSON(), 'object');
+    const client = await newClient();
+    const signedIn = await signIn(client);
+    const stored = TokenSet.from({ ...signedIn.toJSON(), claims: undefined });
+    assert.equal(stored.claims, undefined, 'the id_token is not decoded without validation');
+    await assert.rejects(client.userinfo(stored), (e) => e.code === 'sub_mismatch');
+  });
+
+  it('keeps the authorization server\'s and a resource server\'s DPoP nonces apart on one origin', async () => {
+    const client = await newClient({ dpop: true });
+    op.state.requireNonce = { token: true, resource: true };
+    op.state.nonces = { token: 'n-token', resource: 'n-resource' };
+    const tokens = await signIn(client);
+    await client.userinfo(tokens);
+    const before = op.state.tokenCalls;
+    await client.refresh(tokens);
+    assert.equal(op.state.tokenCalls - before, 1, 'the refresh presents the token endpoint\'s nonce, with no retry');
+  });
+
+  it('reports a failing listener without rethrowing it', async () => {
+    const { Emitter } = await import('../src/index.js');
+    const lines = [];
+    const original = console.error;
+    console.error = (...args) => lines.push(args.join(' '));
+    const uncaught = [];
+    const onUncaught = (err) => uncaught.push(err);
+    process.on('uncaughtException', onUncaught);
+    try {
+      const e = new Emitter();
+      const seen = [];
+      e.on('x', () => { throw new Error('first'); });
+      e.on('x', async () => { throw new Error('second'); });
+      e.on('x', () => seen.push('third'));
+      e.emit('x');
+      await new Promise((res) => setTimeout(res, 10));
+      assert.deepEqual(seen, ['third']);
+    } finally {
+      console.error = original;
+      process.off('uncaughtException', onUncaught);
+    }
+    assert.deepEqual(uncaught, []);
+    assert.equal(lines.length, 2);
   });
 });
 
