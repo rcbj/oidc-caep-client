@@ -100,7 +100,7 @@ Two settings look similar but **don't** grant a scope:
 npm install oidc-caep-client
 ```
 
-That adds `"oidc-caep-client": "^0.1.0"` to the `dependencies` in your `package.json`, and installs its one dependency, [`jose`](https://github.com/panva/jose). Versions are `M.N.O`, with `O` the UTC build time, so `^0.1.0` takes every later 0.1 build. Pin one version instead for reproducible builds. `npm install oidc-caep-client@next` gets the latest build from `develop`, ahead of a release. The README's [Installing](../README.md#installing) section has the details.
+That adds `"oidc-caep-client": "^0.2.0"` to the `dependencies` in your `package.json`, and installs its one dependency, [`jose`](https://github.com/panva/jose). Versions are ordinary semver, so `^0.2.0` takes every later 0.2 release; pin one version instead for reproducible builds. `npm install oidc-caep-client@next` gets the latest pre-release built from `develop`, ahead of a release. The README's [Installing](../README.md#installing) section has the details.
 
 **TypeScript.** The package ships its own declarations, so a TypeScript app imports it the same way and gets the types, e.g. `type SecurityEvent` for an event handler's parameter. Set `"module": "NodeNext"` or your bundler's resolution so TypeScript reads the package's `exports`. The examples below are JavaScript; they compile as TypeScript unchanged.
 
