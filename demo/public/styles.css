@@ -248,7 +248,6 @@ label.check { display: inline-flex; align-items: center; gap: 8px; font-weight: 
 .menu-sep { height: 1px; background: var(--border); margin: 6px 4px; }
 .avatar { flex: none; }
 .avatar.plus { background: var(--bg); color: var(--muted); border: 1px dashed var(--border); }
-.badge { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--danger); color: #fff; font: 600 11px/20px system-ui, sans-serif; text-align: center; }
 
 .accounts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .acct { display: flex; align-items: flex-start; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
@@ -267,7 +266,5 @@ label.check { display: inline-flex; align-items: center; gap: 8px; font-weight: 
 }
 .banner-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
-/* Event log: whose signals */
+/* Event log tools */
 .log-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
-.log-who { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); margin-right: auto; max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.log-top .evt + .log-who { margin-left: 8px; }
