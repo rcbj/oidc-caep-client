@@ -43,7 +43,7 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=24.22.1"
   },
   "dependencies": {
     "jose": "^6.2.12"
