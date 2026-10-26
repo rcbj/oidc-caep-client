@@ -8,6 +8,8 @@
     - { title: Overview, url: / }
     - { title: Building a browser SPA, url: /spa-guide.html }
     - { title: API reference, url: /reference.html }
+    - { title: Running the demo, url: /demo.html }
+    - { title: Development and releases, url: /development.html }
 
 - section: Source
   items:
