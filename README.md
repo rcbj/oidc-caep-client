@@ -7,6 +7,14 @@ An in-browser OpenID Connect client library, plus a demo single-page app. The li
 | [`packages/oidc-caep-client`](packages/oidc-caep-client) | **The library**: Web APIs only, so it runs in browsers and in Node.js. See its [SPA guide](packages/oidc-caep-client/docs/spa-guide.md) to build an app with it, and its [README](packages/oidc-caep-client/README.md) for the security features and the API. |
 | [`demo`](demo) | A single-page app, served by a small static server in one container. The OIDC client runs in the browser and reads `demo/public/oidc.json`. |
 
+## Use the library
+
+```sh
+npm install oidc-caep-client
+```
+
+That adds `"oidc-caep-client": "^0.1.0"` to the `dependencies` in your `package.json`. The package README's [Installing](packages/oidc-caep-client/README.md#installing) section covers version ranges, the `next` channel, and loading it with or without a bundler. The [SPA guide](packages/oidc-caep-client/docs/spa-guide.md) walks through building an app with it.
+
 ## Run the demo
 
 ```sh
