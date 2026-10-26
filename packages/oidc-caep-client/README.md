@@ -10,6 +10,39 @@ It uses Web APIs only (`fetch`, WebCrypto, `URL`, Web Storage, IndexedDB), so it
 
 **New to the library?** [Building a browser single-page app](docs/spa-guide.md) walks through it step by step: setting up the identity provider, serving the page, sign-in, storage, calling APIs, CAEP events and sign-out. This README is the reference.
 
+## Installing
+
+The package is on npm as [`oidc-caep-client`](https://www.npmjs.com/package/oidc-caep-client). Add it to your project:
+
+```sh
+npm install oidc-caep-client
+```
+
+That adds it to the `dependencies` in your `package.json`:
+
+```json
+{
+  "dependencies": {
+    "oidc-caep-client": "^0.1.0"
+  }
+}
+```
+
+**Versions are `M.N.O`**, where `O` is the UTC time the package was built (`0.1.20261026182841`). So `^0.1.0` takes every later build of 0.1, and nothing from 0.2, which may change the API. For a reproducible build, pin one version (`"oidc-caep-client": "0.1.20261026182841"`) and let your lock file record it.
+
+**Release channels.** `latest` (the default) is built from `main`. `next` is built from `develop`, ahead of a release: `npm install oidc-caep-client@next`.
+
+**Loading it in the browser.**
+
+- **With a bundler** (Vite, webpack, esbuild, Rollup): `import { OIDCClient } from 'oidc-caep-client'`. It's plain ES modules, so nothing needs configuring.
+- **Without a bundler:** serve `node_modules/oidc-caep-client/src/` and `jose`'s browser build (`node_modules/jose/dist/webapi/`), and map them in an import map, as the demo does:
+
+  ```html
+  <script type="importmap">{"imports":{"jose":"/vendor/jose/index.js","oidc-caep-client":"/lib/index.js"}}</script>
+  ```
+
+The package's one dependency, [`jose`](https://github.com/panva/jose), is installed with it. Under Node.js (tests, server-side tools) it needs Node.js 24.22.1 or later (`engines`).
+
 ## Security features
 
 These follow RFC 9700 (the OAuth 2.0 Security Best Current Practice), OpenID Connect Core, and the IETF guidance for browser-based apps.

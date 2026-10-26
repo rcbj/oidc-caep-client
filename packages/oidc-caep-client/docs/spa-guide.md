@@ -94,16 +94,24 @@ Two settings look similar but **don't** grant a scope:
 
 ## 3. Serve the app
 
+### Install the library
+
+```sh
+npm install oidc-caep-client
+```
+
+That adds `"oidc-caep-client": "^0.1.0"` to the `dependencies` in your `package.json`, and installs its one dependency, [`jose`](https://github.com/panva/jose). Versions are `M.N.O`, with `O` the UTC build time, so `^0.1.0` takes every later 0.1 build. Pin one version instead for reproducible builds. `npm install oidc-caep-client@next` gets the latest build from `develop`, ahead of a release. The README's [Installing](../README.md#installing) section has the details.
+
 ### Load the library
 
-The library is plain ES modules with one dependency, [`jose`](https://github.com/panva/jose). With a bundler, `import { OIDCClient } from 'oidc-caep-client'` just works. Without one, serve both packages and add an import map, as the demo does:
+The library is plain ES modules. With a bundler, `import { OIDCClient } from 'oidc-caep-client'` just works. Without one, serve both packages from `node_modules` and add an import map, as the demo does:
 
 ```html
 <script type="importmap">{"imports":{"jose":"/vendor/jose/index.js","oidc-caep-client":"/lib/index.js"}}</script>
 <script type="module" src="/app.js"></script>
 ```
 
-Serve the package's `src/` directory at `/lib/`, and `jose`'s browser build (`node_modules/jose/dist/webapi/`) at `/vendor/jose/`.
+Serve `node_modules/oidc-caep-client/src/` at `/lib/`, and `jose`'s browser build (`node_modules/jose/dist/webapi/`) at `/vendor/jose/`.
 
 ### Serve the page at the callback path too
 
