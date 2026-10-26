@@ -1,6 +1,6 @@
 # oidc-caep-client
 
-An OpenID Connect client library for **browser apps**, configured from the provider's metadata document. It runs as a **public client**: no client secret, and `token_endpoint_auth_method: none`. It covers:
+An OpenID Connect client library for **browser apps**, usable from JavaScript and TypeScript, configured from the provider's metadata document. It runs as a **public client**: no client secret, and `token_endpoint_auth_method: none`. It covers:
 
 - signing users in;
 - caching tokens and refreshing them before they expire;
@@ -32,6 +32,17 @@ That adds it to the `dependencies` in your `package.json`:
 
 **Release channels.** `latest` (the default) is built from `main`. `next` is built from `develop`, ahead of a release: `npm install oidc-caep-client@next`.
 
+**TypeScript.** The package ships type declarations (`types/*.d.ts`, generated from the source's JSDoc), so TypeScript finds them through `package.json` with nothing to install or configure. The library itself stays JavaScript, and works the same from both:
+
+```ts
+import { OIDCClient, SSFReceiver, type SecurityEvent, type TokenSet } from 'oidc-caep-client';
+
+const receiver = new SSFReceiver({ transmitterIssuer: 'https://idp.example.com' });
+receiver.onSessionRevoked((evt: SecurityEvent) => signOutLocally(evt.reasonUser?.en));
+```
+
+The exported types include `OIDCClientConfig`, `SSFReceiverConfig`, `SecurityEvent`, `SecurityEventHandler`, `SSFErrorContext`, `TokenSet`, `Account`, `AccountManagerOptions`, `TokenStore` and `KeyStore`. Use `"module": "NodeNext"` (or a bundler's resolution) so TypeScript reads the package's `exports`; the package is ES modules only. In JavaScript, add `// @ts-check` (or `checkJs`) to get the same checking in your editor.
+
 **Loading it in the browser.**
 
 - **With a bundler** (Vite, webpack, esbuild, Rollup): `import { OIDCClient } from 'oidc-caep-client'`. It's plain ES modules, so nothing needs configuring.
@@ -50,7 +61,7 @@ These follow RFC 9700 (the OAuth 2.0 Security Best Current Practice), OpenID Con
 | Protection | What the library does |
 |---|---|
 | **Authorization Code + PKCE** | Uses only `response_type=code`, with PKCE `S256`. It refuses an OP whose metadata doesn't offer S256 (downgrade protection). |
-| **`state`** | A new random 256-bit value per request, stored with the transaction in `sessionStorage`. On return, `state` is **required** and compared in constant time, and the transaction is **single use** (a replayed response is refused with `state_reused`). It **expires** after `transactionTtlSec` (default 10 minutes) and is **bound to the issuer and client** that started it. It is checked *before* an error response is reported. |
+| **`state`** | A new random 256-bit value per request, stored with the transaction in `sessionStorage`. On return, `state` is **required** and compared in constant time, and the transaction is **single use** (a replayed response is refused: `state_reused` in the same page, `state_mismatch` after a reload, since the transaction is gone). It **expires** after `transactionTtlSec` (default 10 minutes) and is **bound to the issuer and client** that started it. It is checked *before* an error response is reported. |
 | **`nonce`** | A new random 256-bit value per request, compared in constant time with the ID token's `nonce`. |
 | **Mix-up defence** | RFC 9207: the `iss` response parameter must match, and is required when the OP advertises it. Transactions are bound to their issuer. |
 | **Authorization response hygiene** | Refuses tokens in the front channel (`access_token`, `id_token` and so on, including in the fragment) and repeated parameters. |
@@ -61,7 +72,7 @@ These follow RFC 9700 (the OAuth 2.0 Security Best Current Practice), OpenID Con
 | **Audience-restricted tokens** | RFC 8707 resource indicators (`resource`) on the authorization, token and refresh requests. |
 | **Refresh tokens** | Rotation is handled. Concurrent refreshes are merged into one request, so rotation stays safe. With DPoP, refresh tokens are sender-constrained, as RFC 9700 §2.2.2 recommends for public clients. A refreshed ID token must keep the original `iss`, `sub`, `aud` and `azp` (OIDC Core §12.2). A deletion waits for a refresh in flight, so revoked tokens are never written back. |
 | **Logout** | RP-Initiated Logout with its own single-use, expiring `state`, validated on return (`validateEndSessionCallback()`). `TokenManager.delete(key, { revoke: true })` and `AccountManager.signOut()` revoke the tokens (RFC 7009); `createEndSessionRequest()` alone does not. |
-| **Token storage** | `TokenManager`: memory by default (`MemoryTokenStore`). `AccountManager`: IndexedDB by default only when DPoP is on, otherwise memory; a persistent store without DPoP logs a warning. The response cannot set the token set's prototype, `claims` or expiry. |
+| **Token storage** | A token set's `claims` come only from a validated ID token; a stored record without them is never filled in by decoding the ID token. `TokenManager`: memory by default (`MemoryTokenStore`). `AccountManager`: IndexedDB by default only when DPoP is on, otherwise memory; a persistent store without DPoP logs a warning. The response cannot set the token set's prototype, methods, `claims` or expiry. |
 | **UserInfo** | The response `sub` must equal the ID token's: `expectedSub`, or by default the TokenSet's ID token `sub` (OIDC Core §5.3.2). A signed UserInfo response is verified with an asymmetric algorithm (`userinfoSignedResponseAlg` pins one). |
 
 **Not included:**
@@ -152,7 +163,7 @@ const logout = await accounts.signOut(key);            // revokes; id_token_hint
 - **Activating** a dormant account refreshes its tokens first if they are due, then runs `onActivate`, and only then makes the account active. If a signal handled during `onActivate` ends the account, it becomes active with status `ended` and its tokens are never handed out. If the refresh or the hook fails, the previously active account is reactivated.
 - **Across tabs:**
   - A refresh holds a Web Lock (`navigator.locks`), so two tabs never present the same rotating refresh token. A tab that was waiting for the lock reuses the tokens the other tab just got.
-  - Changes to the account list go through a lock too, and are announced to the other tabs (`BroadcastChannel`). A tab whose active account was signed out elsewhere sees its status change, and stops refreshing that account.
+  - Changes to the account list go through a lock too, and are announced to the other tabs (`BroadcastChannel`). A reload of the list waits for a change this tab is making, so it can't lose an account being added. A tab whose active account was signed out elsewhere sees its status change, and stops refreshing that account.
 - **A request that names an account only accepts that account.** `resume(key)` asks without a screen (`prompt=none`); `reauthenticate(key)` uses `prompt=login`. Both send `login_hint` and the cached `id_token_hint`. If the OP signs in somebody else, the callback refuses with `account_mismatch` and revokes the tokens it got. `createAuthorizationRequest({ expectedSub })` gives the same check to any request.
 - **`prompt=none` failures say which account they were for.** With several accounts signed in and nothing naming one, the OP answers `account_selection_required` (OpenID Connect Core §3.1.2.6). `needsInteraction(err)` covers it, along with `login_required`, `interaction_required` and `consent_required`. For `resume` and `reauth`, `err.account` is set.
 - **Signing out one account leaves the others signed in.** Its logout request names its ID token, so the OP ends that session only. If it was this tab's active account, the most recently added signed-in account becomes active. `signOutAll()` sends one logout request that names nobody, so the OP asks which accounts to end.
@@ -242,7 +253,8 @@ In addition, a replayed `jti` is dropped.
 **Acknowledgement (RFC 8936).** An acknowledged SET, and one reported back as an error, is never sent again, so the receiver is careful with both:
 
 - A SET is acknowledged only after its handlers ran without throwing. If one throws, the SET is left for the transmitter to send again, up to `maxDeliveryAttempts` times (default 5). After that it is acknowledged and `onError` gets `handler_failed`. Make handlers idempotent: a reload can also bring a handled SET back before its acknowledgement was sent.
-- Only a definitely invalid SET is reported as an error (bad signature, issuer, audience, `typ`, claims). One that couldn't be checked for a reason that may pass is left for redelivery: a network error fetching the JWKS, or a key the cached JWKS doesn't hold yet.
+- Only a definitely invalid SET is reported as an error (bad signature, issuer, audience, `typ`, claims). One that couldn't be checked for a reason that may pass is left for redelivery for as long as that lasts, and never reported: a network error fetching the JWKS, or a key the cached JWKS doesn't hold yet.
+- Polls never overlap: `poll()` during a poll shares it, and `pollNow()` during a poll asks for another right after it. A SET whose handlers are still running is never acknowledged by another poll.
 - `stop()` sends the acknowledgements still owed.
 - The poll endpoint must use TLS and share an origin with the transmitter (`trustedPollOrigins` adds others), because every poll carries the person's access token.
 - Errors go to `onError`; without one, they are written to `console.error`, so a lost signal always leaves a trace.

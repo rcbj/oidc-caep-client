@@ -29,7 +29,7 @@ const NAMED_HANDLERS = {
  * @property {string} type              Event type URI.
  * @property {string} name              Short name, e.g. "session-revoked".
  * @property {Record<string, any>} payload  The event-specific object from the SET `events` claim.
- * @property {object|undefined} subject RFC 9493 subject identifier (`sub_id`, or legacy `subject` inside the event).
+ * @property {Record<string, any>|undefined} subject RFC 9493 subject identifier (`sub_id`, or legacy `subject` inside the event).
  * @property {number|undefined} eventTimestamp  CAEP `event_timestamp` (seconds), falling back to SET `toe`/`iat`.
  * @property {string|undefined} initiatingEntity  "admin" | "user" | "policy" | "system"
  * @property {Record<string,string>|undefined} reasonAdmin
@@ -46,7 +46,23 @@ const NAMED_HANDLERS = {
 /**
  * @callback SecurityEventHandler
  * @param {SecurityEvent} event
- * @returns {void|Promise<void>}
+ * @returns {unknown} Anything; a promise is awaited before the SET is acknowledged.
+ */
+
+/**
+ * @typedef {object} SSFErrorContext  Where an error came from.
+ * @property {'poll'|'handler'|'hook'|'stop'|'error'} phase  `poll`: polling or validating a SET; `handler`: a
+ *           handler threw; `hook`: `onEventReceived` threw; `stop`: sending the last acknowledgements failed.
+ * @property {string} [jti]          The SET concerned, when there is one.
+ * @property {SecurityEvent} [event] The event whose handler threw.
+ * @property {boolean} [willRetry]   The SET was left for the transmitter to send again.
+ */
+
+/**
+ * @callback SSFErrorHandler
+ * @param {Error & { code?: string }} error
+ * @param {SSFErrorContext} context
+ * @returns {void}
  */
 
 /**
@@ -54,7 +70,8 @@ const NAMED_HANDLERS = {
  * event and its `jti` only. The payload and subject can carry personal data (email, phone, session id,
  * IP address), and a console is read by extensions and error reporters, so they are left out.
  * Call it from your own hook to keep the line.
- * @type {SecurityEventHandler}
+ * @param {SecurityEvent} event
+ * @returns {void}
  */
 export function logEventReceived(event) {
   console.log(`[oidc-caep-client] CAEP event received: ${event.name} (jti ${event.jti})`);
@@ -83,10 +100,10 @@ const SSF_URL_MEMBERS = ['jwks_uri', 'configuration_endpoint', 'status_endpoint'
  * @property {number} [maxSetAgeSec]    Reject SETs whose `iat` is older than this (seconds). Default 0: no limit.
  *           A polled SET waits at the transmitter until it is read, so an age limit would throw away the
  *           signals a stopped receiver catches up on. A replay is caught by its `jti` whatever its age.
- * @property {number} [maxDeliveryAttempts] How many times a SET is left for redelivery when its handlers
- *           throw, or when it can't be checked for a reason that may pass (a network error, a signing key
- *           not yet in the JWKS). After that it is acknowledged (handler failure) or reported to the
- *           transmitter as an error (validation). Default 5.
+ * @property {number} [maxDeliveryAttempts] How many times a SET whose handlers throw is left for the
+ *           transmitter to send again before it is acknowledged anyway (`onError` gets `handler_failed`).
+ *           Default 5. A SET that can't be checked for a reason that may pass (a network error, a signing
+ *           key not yet in the JWKS) is never reported as an error: it is left for redelivery until it can.
  * @property {boolean} [allowInsecureRequests] Allow non-TLS SSF URLs other than loopback. Default false.
  * @property {string[]} [trustedPollOrigins] Origins besides the transmitter's issuer and
  *           configuration_endpoint that the stream's poll endpoint_url may be at. The poll request carries
@@ -112,9 +129,9 @@ const SSF_URL_MEMBERS = ['jwks_uri', 'configuration_endpoint', 'status_endpoint'
  * Any other event type (e.g. RISC) can be handled with `onEvent(uri, handler)`.
  */
 export class SSFReceiver {
-  /** @type {Record<string, any>} Transmitter metadata. */
+  /** Transmitter metadata. @type {Record<string, any>} */
   metadata;
-  /** @type {Record<string, any>} Current stream configuration. */
+  /** Current stream configuration. @type {Record<string, any>} */
   stream;
 
   #cfg;
@@ -127,6 +144,12 @@ export class SSFReceiver {
   #pendingVerifications = new Map();
   #pollTimer;
   #polling = false;
+  /** The poll request in flight, if any: polls never overlap (see poll()). */
+  #pollInFlight;
+  /** pollNow() was called while a poll was in flight: poll again as soon as it finishes. */
+  #pollAgain = false;
+  /** The jtis whose handlers are running now; a redelivery of one of them is left alone. */
+  #inFlight = new Set();
   #pendingAcks = [];
   #pendingErrs = {};
   #attempts = new Map();
@@ -166,25 +189,65 @@ export class SSFReceiver {
   // Handler registration — one per CAEP event, plus generic hooks
   // ---------------------------------------------------------------------------
 
-  /** CAEP session-revoked: the session(s) for the subject were revoked; terminate local sessions. */
+  /**
+   * CAEP session-revoked: the session(s) for the subject were revoked; terminate local sessions.
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onSessionRevoked(handler) { return this.onEvent(CAEP.SESSION_REVOKED, handler); }
-  /** CAEP token-claims-change: claims in previously issued tokens changed (payload.claims). */
+  /**
+   * CAEP token-claims-change: claims in previously issued tokens changed (payload.claims).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onTokenClaimsChange(handler) { return this.onEvent(CAEP.TOKEN_CLAIMS_CHANGE, handler); }
-  /** CAEP credential-change: a credential was created/revoked/updated/deleted (payload.credential_type, change_type). */
+  /**
+   * CAEP credential-change: a credential was created/revoked/updated/deleted (payload.credential_type, change_type).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onCredentialChange(handler) { return this.onEvent(CAEP.CREDENTIAL_CHANGE, handler); }
-  /** CAEP assurance-level-change: authentication assurance changed (payload.current_level, previous_level, change_direction). */
+  /**
+   * CAEP assurance-level-change: authentication assurance changed (payload.current_level, previous_level, change_direction).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onAssuranceLevelChange(handler) { return this.onEvent(CAEP.ASSURANCE_LEVEL_CHANGE, handler); }
-  /** CAEP device-compliance-change: device compliance changed (payload.current_status: "compliant" | "not-compliant"). */
+  /**
+   * CAEP device-compliance-change: device compliance changed (payload.current_status: "compliant" | "not-compliant").
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onDeviceComplianceChange(handler) { return this.onEvent(CAEP.DEVICE_COMPLIANCE_CHANGE, handler); }
-  /** CAEP session-established: a new session was established (payload.acr, amr, fp_ua, ext_id). */
+  /**
+   * CAEP session-established: a new session was established (payload.acr, amr, fp_ua, ext_id).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onSessionEstablished(handler) { return this.onEvent(CAEP.SESSION_ESTABLISHED, handler); }
-  /** CAEP session-presented: a session was presented to a service (payload.fp_ua, ext_id). */
+  /**
+   * CAEP session-presented: a session was presented to a service (payload.fp_ua, ext_id).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onSessionPresented(handler) { return this.onEvent(CAEP.SESSION_PRESENTED, handler); }
-  /** CAEP risk-level-change: the risk level of a principal changed (payload.current_level, previous_level, risk_reason, principal). */
+  /**
+   * CAEP risk-level-change: the risk level of a principal changed (payload.current_level, previous_level, risk_reason, principal).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onRiskLevelChange(handler) { return this.onEvent(CAEP.RISK_LEVEL_CHANGE, handler); }
-  /** SSF verification event (payload.state). */
+  /**
+   * SSF verification event (payload.state).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onVerification(handler) { return this.onEvent(SSF.VERIFICATION, handler); }
-  /** SSF stream-updated event (payload.status, payload.reason). */
+  /**
+   * SSF stream-updated event (payload.status, payload.reason).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onStreamUpdated(handler) { return this.onEvent(SSF.STREAM_UPDATED, handler); }
 
   /**
@@ -199,14 +262,31 @@ export class SSFReceiver {
     return this;
   }
 
-  /** Called for every accepted event, after type-specific handlers. */
+  /**
+   * Called for every accepted event, after type-specific handlers.
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onAnyEvent(handler) { assertFn(handler); this.#anyHandlers.add(handler); return this; }
-  /** Called for events with no type-specific handler. */
+  /**
+   * Called for events with no type-specific handler.
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onUnhandledEvent(handler) { assertFn(handler); this.#unhandledHandlers.add(handler); return this; }
-  /** Called with (error, context) when a SET is rejected, a handler throws, or polling fails. */
+  /**
+   * Called with (error, context) when a SET is rejected, a handler throws, or polling fails.
+   * @param {SSFErrorHandler} handler
+   * @returns {this}
+   */
   onError(handler) { assertFn(handler); this.#errorHandlers.add(handler); return this; }
 
-  /** Removes a handler previously registered with onEvent / on<Name>. */
+  /**
+   * Removes a handler previously registered with onEvent / on<Name>.
+   * @param {string} eventType
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   off(eventType, handler) {
     this.#handlers.get(eventType)?.delete(handler);
     return this;
@@ -282,6 +362,8 @@ export class SSFReceiver {
   async stop({ deleteStream = false } = {}) {
     this.#polling = false;
     clearTimeout(this.#pollTimer);
+    // A poll still running may finish handling SETs; their acknowledgements go in the flush below.
+    await this.#pollInFlight?.catch(() => {});
     await this.#flushAcks();
     if (deleteStream && this.stream?.stream_id) {
       await this.deleteStream().catch((err) => this.#emitError(err, { phase: 'stop' }));
@@ -481,15 +563,35 @@ export class SSFReceiver {
   /** Triggers an immediate poll (poll delivery only). */
   pollNow() {
     if (!this.#polling) return;
+    // During a poll the loop's timer has already fired, so clearing it would not stop that loop: a new
+    // timer here would start a second one. Ask the running loop to poll again instead.
+    if (this.#pollInFlight) {
+      this.#pollAgain = true;
+      return;
+    }
+    this.#scheduleLoop(0);
+  }
+
+  #scheduleLoop(delay) {
     clearTimeout(this.#pollTimer);
-    this.#pollTimer = setTimeout(() => this.#pollLoop(), 0);
+    this.#pollTimer = setTimeout(() => this.#pollLoop(), delay);
+    this.#pollTimer.unref?.();
   }
 
   /**
    * Performs one RFC 8936 poll request, acknowledging previously processed SETs.
    * @returns {Promise<{ received: number, moreAvailable: boolean }>}
    */
-  async poll() {
+  poll() {
+    // One poll at a time. Two overlapping polls both receive a SET that is not acknowledged yet, and the
+    // second would see it as a replay while the first is still handling it. A call during a poll shares it.
+    if (!this.#pollInFlight) {
+      this.#pollInFlight = this.#pollOnce().finally(() => { this.#pollInFlight = undefined; });
+    }
+    return this.#pollInFlight;
+  }
+
+  async #pollOnce() {
     const endpoint = this.#pollEndpoint();
     const ack = this.#pendingAcks.splice(0);
     const setErrs = this.#pendingErrs;
@@ -516,16 +618,29 @@ export class SSFReceiver {
   /**
    * One polled SET. RFC 8936 §2.4: an acknowledged SET, and one reported in `setErrs`, are never sent again.
    * So a SET is acknowledged only once its handlers have run without throwing, and reported only when it is
-   * definitely invalid. One that may pass later (a handler that threw, a network error while checking it, a
-   * signing key not yet in the JWKS) is left alone, and the transmitter sends it again, up to
-   * `maxDeliveryAttempts` times.
+   * definitely invalid. One whose handlers threw is left for the transmitter to send again, up to
+   * `maxDeliveryAttempts` times; one that couldn't be checked for a reason that may pass is left until it can.
    */
   async #receivePolled(jti, token) {
+    // Being handled right now (a poll from another receiver instance, or one shared by poll() callers):
+    // neither acknowledged nor reported, so the transmitter keeps it until that handling finishes.
+    if (this.#inFlight.has(jti)) return;
+    this.#inFlight.add(jti);
+    try {
+      await this.#receivePolledOnce(jti, token);
+    } finally {
+      this.#inFlight.delete(jti);
+    }
+  }
+
+  async #receivePolledOnce(jti, token) {
     let events;
     try {
       events = await this.validateSet(token);
     } catch (err) {
-      if (err.retryable && this.#attempt(jti) < this.#cfg.maxDeliveryAttempts) {
+      // May pass later (the JWKS unreachable, a rotated key the cached set lacks; jose waits 30 s before
+      // fetching the set again): never reported, however often, so the transmitter keeps sending it.
+      if (err.retryable) {
         this.#emitError(err, { phase: 'poll', jti, willRetry: true });
         return;
       }
@@ -615,6 +730,7 @@ export class SSFReceiver {
 
   async #pollLoop() {
     if (!this.#polling) return;
+    this.#pollAgain = false;
     let delay = this.#cfg.pollIntervalMs;
     try {
       const { moreAvailable } = await this.poll();
@@ -622,10 +738,8 @@ export class SSFReceiver {
     } catch (err) {
       this.#emitError(err, { phase: 'poll' });
     }
-    if (this.#polling) {
-      this.#pollTimer = setTimeout(() => this.#pollLoop(), delay);
-      this.#pollTimer.unref?.();
-    }
+    if (this.#pollAgain) delay = 0;
+    if (this.#polling) this.#scheduleLoop(delay);
   }
 
   /** @returns {Promise<boolean>} false when a handler threw */
@@ -673,8 +787,9 @@ export class SSFReceiver {
     }
     for (const h of this.#errorHandlers) {
       try {
-        h(err, context);
-      } catch { /* never let an error handler break delivery */ }
+        // An async handler's rejection is caught too: never let an error handler break delivery.
+        Promise.resolve(h(err, context)).catch(() => {});
+      } catch { /* a synchronous throw, likewise */ }
     }
   }
 

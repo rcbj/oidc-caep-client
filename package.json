@@ -12,7 +12,9 @@
     "register-iya-sts": "node scripts/register-iya-sts-client.mjs",
     "version:print": "node scripts/version.mjs",
     "version:check": "node scripts/version.mjs --check-manifests",
-    "version:sync": "node scripts/version.mjs --sync-manifests"
+    "version:sync": "node scripts/version.mjs --sync-manifests",
+    "build:types": "npm run build:types -w packages/oidc-caep-client",
+    "test:types": "npm run build:types -w packages/oidc-caep-client && npm run test:types -w packages/oidc-caep-client"
   },
   "engines": {
     "node": ">=24.22.1"

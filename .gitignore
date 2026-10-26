@@ -1,1 +1,4 @@
 node_modules/
+packages/oidc-caep-client/types/
+packages/oidc-caep-client/test/types/doc-examples/
+_site_api/
