@@ -1,7 +1,7 @@
 import { OAuthError, OIDCClientError } from './errors.js';
 import { MemoryTokenStore } from './stores.js';
 import { TokenSet } from './token-set.js';
-import { Emitter } from './util.js';
+import { Emitter, withLock } from './util.js';
 
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
@@ -10,7 +10,10 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
  *
  * - `getAccessToken(key)` always returns a token valid for at least `refreshSkewSec`, refreshing on demand.
  * - With `autoRefresh` (default), a timer refreshes each token `refreshSkewSec` before it expires.
- * - Concurrent refreshes for the same key are coalesced into one token-endpoint call.
+ * - Concurrent refreshes for the same key are coalesced into one token-endpoint call; across tabs sharing
+ *   a store, a refresh holds a Web Lock and reuses the tokens another tab has just obtained, so a rotating
+ *   refresh token is never presented twice.
+ * - `set(key, ts, { schedule: false })` / `unschedule(key)` keep a key's tokens without refreshing them.
  *
  * Events:
  *   "refreshed"      (key, tokenSet)  — new tokens obtained via refresh_token
@@ -22,6 +25,7 @@ export class TokenManager extends Emitter {
   #client;
   #store;
   #timers = new Map();
+  #wanted = new Set();
   #inflight = new Map();
   #opts;
 
@@ -36,12 +40,33 @@ export class TokenManager extends Emitter {
     this.#opts = { refreshSkewSec, autoRefresh, minRefreshDelayMs, retryDelayMs };
   }
 
-  /** Stores tokens for a key and schedules their proactive refresh. */
-  async set(key, tokenSet) {
+  /**
+   * Stores tokens for a key and (unless `schedule: false`) schedules their proactive refresh.
+   * @param {string} key
+   * @param {TokenSet|object} tokenSet
+   * @param {{ schedule?: boolean }} [opts]
+   */
+  async set(key, tokenSet, { schedule = true } = {}) {
     const ts = TokenSet.from(tokenSet);
     await this.#store.set(key, ts.toJSON());
+    if (schedule) this.#wanted.add(key);
+    else this.unschedule(key);
     this.#schedule(key, ts);
     return ts;
+  }
+
+  /** Schedules the proactive refresh of the tokens already stored for key. */
+  async schedule(key) {
+    this.#wanted.add(key);
+    const ts = await this.get(key);
+    if (ts) this.#schedule(key, ts);
+  }
+
+  /** Stops refreshing key's tokens in the background; they stay stored. */
+  unschedule(key) {
+    this.#wanted.delete(key);
+    clearTimeout(this.#timers.get(key));
+    this.#timers.delete(key);
   }
 
   /** @returns {Promise<TokenSet|undefined>} Cached tokens (possibly expired) for key. */
@@ -68,17 +93,26 @@ export class TokenManager extends Emitter {
     const existing = this.#inflight.get(key);
     if (existing) return existing;
     const p = (async () => {
-      const current = await this.get(key);
-      if (!current) throw new OIDCClientError(`No tokens cached for ${key}`, { code: 'no_tokens' });
+      const before = await this.get(key);
+      if (!before) throw new OIDCClientError(`No tokens cached for ${key}`, { code: 'no_tokens' });
       try {
-        const next = await this.#client.refresh(current);
-        // The key may have been deleted (e.g. CAEP session revoked) while the request was in flight.
-        if (!(await this.#store.get(key))) {
-          throw new OIDCClientError(`Tokens for ${key} were removed during refresh`, { code: 'no_tokens' });
-        }
-        await this.set(key, next);
-        this.emit('refreshed', key, next);
-        return next;
+        return await withLock(`oidc-caep-client:refresh:${key}`, async () => {
+          // Another tab sharing the store may have refreshed while this one waited for the lock.
+          const current = await this.get(key);
+          if (!current) throw new OIDCClientError(`Tokens for ${key} were removed`, { code: 'no_tokens' });
+          if (current.access_token !== before.access_token && !current.isExpired(this.#opts.refreshSkewSec)) {
+            this.#schedule(key, current);
+            return current;
+          }
+          const next = await this.#client.refresh(current);
+          // The key may have been deleted (e.g. CAEP session revoked) while the request was in flight.
+          if (!(await this.#store.get(key))) {
+            throw new OIDCClientError(`Tokens for ${key} were removed during refresh`, { code: 'no_tokens' });
+          }
+          await this.set(key, next, { schedule: this.#wanted.has(key) });
+          this.emit('refreshed', key, next);
+          return next;
+        });
       } catch (err) {
         this.emit('refresh_error', key, err);
         if (err instanceof OAuthError && (err.error === 'invalid_grant' || err.error === 'invalid_client')) {
@@ -134,11 +168,11 @@ export class TokenManager extends Emitter {
   close() {
     for (const t of this.#timers.values()) clearTimeout(t);
     this.#timers.clear();
+    this.#wanted.clear();
   }
 
   async #drop(key, event) {
-    clearTimeout(this.#timers.get(key));
-    this.#timers.delete(key);
+    this.unschedule(key);
     await this.#store.delete(key);
     this.emit(event, key);
   }
@@ -146,7 +180,7 @@ export class TokenManager extends Emitter {
   #schedule(key, ts) {
     clearTimeout(this.#timers.get(key));
     this.#timers.delete(key);
-    if (!this.#opts.autoRefresh || ts.expires_at === undefined || !ts.refresh_token) return;
+    if (!this.#opts.autoRefresh || !this.#wanted.has(key) || ts.expires_at === undefined || !ts.refresh_token) return;
     const dueMs = (ts.expires_at - ts.effectiveSkew(this.#opts.refreshSkewSec)) * 1000 - Date.now();
     const delay = Math.min(MAX_TIMEOUT_MS, Math.max(this.#opts.minRefreshDelayMs, dueMs));
     const timer = setTimeout(() => {
@@ -160,7 +194,7 @@ export class TokenManager extends Emitter {
   /** After a transient background-refresh failure (already surfaced via "refresh_error"), try again later. */
   async #retry(key) {
     const ts = await this.get(key);
-    if (!ts || this.#timers.has(key)) return;
+    if (!ts || this.#timers.has(key) || !this.#wanted.has(key)) return;
     if (ts.isExpired()) {
       await this.#drop(key, 'expired');
       return;

@@ -80,3 +80,23 @@ export class Emitter {
 export function onceEvent(emitter, event) {
   return new Promise((resolve) => emitter.once(event, (...args) => resolve(args)));
 }
+
+const localLocks = new Map();
+
+/**
+ * Runs `fn` holding the lock `name`: across every tab of this origin where the Web Locks API exists
+ * (navigator.locks), otherwise within this JavaScript realm only.
+ * @template T
+ * @param {string} name
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export function withLock(name, fn) {
+  if (globalThis.navigator?.locks?.request) return globalThis.navigator.locks.request(name, fn);
+  const previous = localLocks.get(name) ?? Promise.resolve();
+  const run = previous.catch(() => {}).then(fn);
+  const tail = run.catch(() => {});
+  localLocks.set(name, tail);
+  tail.then(() => { if (localLocks.get(name) === tail) localLocks.delete(name); });
+  return run;
+}

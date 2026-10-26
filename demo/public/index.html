@@ -92,13 +92,6 @@
                   <option value="never">Never (unless the IdP requires it)</option>
                 </select>
               </div>
-              <div>
-                <label for="token-storage">Tokens are kept in</label>
-                <select id="token-storage">
-                  <option value="memory">Memory only (sign in again after a reload)</option>
-                  <option value="session">sessionStorage (survive reloads in this tab)</option>
-                </select>
-              </div>
             </div>
             <p class="hint" id="storage-hint"></p>
           </fieldset>
@@ -123,7 +116,7 @@
 
           <fieldset class="caep">
             <legend><label class="check"><input type="checkbox" id="caep-enabled" checked> Subscribe to CAEP events (Shared Signals, poll)</label></legend>
-            <p class="hint">The stream is created with the signed-in user's access token and polled from this browser (RFC 8936). A browser cannot receive pushed events.</p>
+            <p class="hint">Each account's stream is created with its own access token. A tab polls only its active account's stream (RFC 8936); a dormant account's stream keeps queueing, and is caught up when the account is activated. A browser cannot receive pushed events.</p>
             <div class="grid2">
               <div>
                 <label for="ssf-issuer">SSF transmitter issuer</label>
@@ -163,9 +156,23 @@
       <!-- Signed-out hero -->
       <section class="card hero" id="signed-out" hidden>
         <p class="eyebrow">OpenID Connect + Shared Signals</p>
-        <h1>Continuous access, in real time.</h1>
-        <p class="muted">Sign in through your identity provider. This page keeps your tokens, refreshes them before they expire, and listens for CAEP events that can change or end your session while you're using it.</p>
-        <button class="btn primary" id="btn-signin-hero" type="button">Sign in</button>
+        <h1 id="hero-title">Continuous access, in real time.</h1>
+        <p class="muted" id="hero-text"></p>
+        <div class="actions" id="hero-actions"></div>
+      </section>
+
+      <!-- Every account signed in through this page -->
+      <section class="card" id="accounts-card" hidden>
+        <div class="card-head">
+          <h2>Accounts</h2>
+          <span class="muted small" id="accounts-count"></span>
+        </div>
+        <ul class="accounts" id="accounts-list"></ul>
+        <p class="hint" id="accounts-hint"></p>
+        <div class="actions">
+          <button class="btn" id="btn-add-account" type="button">Sign in with another account</button>
+          <button class="btn ghost" id="btn-choose-account" type="button">Choose at the identity provider</button>
+        </div>
       </section>
 
       <section class="card" id="security-card" hidden>
@@ -178,7 +185,7 @@
       <!-- Signed-in session -->
       <section class="card" id="session-card" hidden>
         <div class="card-head">
-          <h2>Session</h2>
+          <h2 id="session-title">Session</h2>
           <span class="pill ok" id="session-pill">Active</span>
         </div>
         <dl class="claims" id="claims"></dl>
@@ -206,8 +213,8 @@
         <div class="card-head">
           <h2>Tokens</h2>
           <div class="seg" role="tablist" aria-label="Which tokens">
-            <button type="button" role="tab" class="seg-btn on" data-which="signIn" aria-selected="true">At sign-in</button>
-            <button type="button" role="tab" class="seg-btn" data-which="current" aria-selected="false">Current</button>
+            <button type="button" role="tab" class="seg-btn tok-seg on" data-which="signIn" aria-selected="true">At sign-in</button>
+            <button type="button" role="tab" class="seg-btn tok-seg" data-which="current" aria-selected="false">Current</button>
           </div>
         </div>
         <p class="muted small" id="tokens-note"></p>
@@ -216,7 +223,7 @@
 
       <section class="card" id="stream-card">
         <div class="card-head">
-          <h2>CAEP stream</h2>
+          <h2 id="stream-title">CAEP stream</h2>
           <span class="pill" id="ssf-pill">…</span>
         </div>
         <dl class="kv" id="ssf-info"></dl>
@@ -232,7 +239,13 @@
     <section class="card log-card">
       <div class="card-head">
         <h2>Event log</h2>
-        <span class="live" id="live"><span class="dot"></span>polling</span>
+        <div class="log-tools">
+          <div class="seg" role="tablist" aria-label="Whose signals">
+            <button type="button" role="tab" class="seg-btn log-seg" data-view="active">This account</button>
+            <button type="button" role="tab" class="seg-btn log-seg" data-view="all">All accounts<span id="log-all-count"></span></button>
+          </div>
+          <span class="live" id="live"><span class="dot"></span>polling</span>
+        </div>
       </div>
       <ol class="log" id="log"></ol>
       <p class="muted empty" id="log-empty">No CAEP events yet. Sign in, then trigger an event at your identity provider (for example, revoke your session).</p>
@@ -243,6 +256,7 @@
     <li class="log-item">
       <div class="log-top">
         <span class="evt"></span>
+        <span class="log-who" hidden></span>
         <time class="muted small"></time>
       </div>
       <p class="action"></p>

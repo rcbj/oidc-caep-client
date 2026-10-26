@@ -201,8 +201,12 @@ export class SSFReceiver {
    * Discovers the transmitter, creates (or reuses) a stream, and starts polling when using poll delivery.
    * If the transmitter already has a stream for this receiver (HTTP 409), that stream is reused and
    * re-pointed at this receiver's delivery settings.
+   *
+   * With `catchUp`, the SETs already queued on the stream are polled and dispatched before this resolves,
+   * e.g. so that a session revoked while the receiver was stopped is acted on before the session is used.
+   * @param {{ catchUp?: boolean }} [opts]
    */
-  async start() {
+  async start({ catchUp = false } = {}) {
     if (!this.metadata) await this.discover();
     if (this.#cfg.streamId) {
       this.stream = await this.getStream(this.#cfg.streamId);
@@ -219,6 +223,7 @@ export class SSFReceiver {
     } else {
       throw new SSFError('Transmitter has no configuration_endpoint and no streamId was supplied');
     }
+    for (let more = catchUp; more;) ({ moreAvailable: more } = await this.poll());
     this.#startPolling();
     return this.stream;
   }

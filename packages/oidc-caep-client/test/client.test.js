@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 import { calculateJwkThumbprint, decodeProtectedHeader, exportJWK, generateKeyPair, importJWK, jwtVerify, SignJWT } from 'jose';
 import {
-  CAEP, clearDiscoveryCache, OAuthError, OIDCClient, registerClient, SETValidationError, SSF, SSFReceiver, Subject,
-  subjectMatches, TokenManager, TransactionStore,
+  AccountManager, CAEP, clearDiscoveryCache, needsInteraction, OAuthError, OIDCClient, registerClient, SETValidationError, SSF, SSFReceiver, Subject,
+  MemoryTokenStore, subjectMatches, TokenManager, TransactionStore,
 } from '../src/index.js';
 import { onceEvent } from '../src/util.js';
 
@@ -67,8 +67,8 @@ async function createStubProvider(opts = {}) {
   };
   const b64sha = (v) => createHash('sha256').update(v).digest('base64url');
 
-  async function idToken(sub, { nonce, accessToken, authTime, typ, iat }) {
-    return new SignJWT({ nonce, at_hash: createHash('sha256').update(accessToken).digest().subarray(0, 16).toString('base64url'), auth_time: authTime, acr: state.acr, email: `${sub}@example.com` })
+  async function idToken(sub, { nonce, accessToken, authTime, typ, iat, sid }) {
+    return new SignJWT({ nonce, at_hash: createHash('sha256').update(accessToken).digest().subarray(0, 16).toString('base64url'), auth_time: authTime, acr: state.acr, email: `${sub}@example.com`, preferred_username: sub, sid })
       .setProtectedHeader({ alg: 'RS256', kid, ...(typ ? { typ } : {}) }).setIssuer(issuer).setSubject(sub)
       .setAudience(clientId).setIssuedAt(iat ?? now()).setExpirationTime('5m').sign(privateKey);
   }
@@ -154,9 +154,9 @@ async function createStubProvider(opts = {}) {
         if (code.dpopJkt && code.dpopJkt !== proof.jkt) return json({ error: 'invalid_grant', error_description: 'dpop_jkt' }, 400);
         const at = issue(code.sub, code.scope);
         const rt = `rt-${rnd()}`;
-        state.refreshTokens.set(rt, { sub: code.sub, authTime: code.authTime, jkt: proof.jkt, scope: code.scope });
+        state.refreshTokens.set(rt, { sub: code.sub, authTime: code.authTime, jkt: proof.jkt, scope: code.scope, sid: code.sid });
         return json({ access_token: at, token_type: tokenType, expires_in: accessTokenTtl, refresh_token: rt, scope: code.scope,
-          id_token: await idToken(code.sub, { nonce: code.nonce, accessToken: at, authTime: code.authTime }) });
+          id_token: await idToken(code.sub, { nonce: code.nonce, accessToken: at, authTime: code.authTime, sid: code.sid }) });
       }
       if (form.get('grant_type') === 'refresh_token') {
         const rt = state.refreshTokens.get(form.get('refresh_token'));
@@ -166,7 +166,7 @@ async function createStubProvider(opts = {}) {
         const next = `rt-${rnd()}`;
         state.refreshTokens.set(next, rt);
         return json({ access_token: at, token_type: tokenType, expires_in: accessTokenTtl, refresh_token: next,
-          id_token: await idToken(rt.sub, { accessToken: at, authTime: rt.authTime }) });
+          id_token: await idToken(rt.sub, { accessToken: at, authTime: rt.authTime, sid: rt.sid }) });
       }
       return json({ error: 'unauthorized_client' }, 400);
     }
@@ -202,6 +202,10 @@ async function createStubProvider(opts = {}) {
       }
       const stream = state.streams.get(u.searchParams.get('stream_id') ?? data.stream_id ?? p.split('/').pop());
       if (!stream) return json({ error: 'not_found' }, 404);
+      if (p === '/ssf/stream' && method === 'GET') {
+        const { subjects, queue, ...pub } = stream;
+        return json(pub);
+      }
       if (p === '/ssf/stream' && method === 'DELETE') {
         state.streams.delete(stream.stream_id);
         return new Response(null, { status: 204 });
@@ -241,8 +245,15 @@ async function createStubProvider(opts = {}) {
       state.lastAuthorize = new URLSearchParams(q);
       const code = rnd();
       state.codes.set(code, { sub, nonce: q.get('nonce'), challenge: q.get('code_challenge'), redirectUri: q.get('redirect_uri'),
-        authTime: now(), dpopJkt: q.get('dpop_jkt'), scope: q.get('scope') });
+        authTime: now(), dpopJkt: q.get('dpop_jkt'), scope: q.get('scope'), sid: `sid-${sub}-${rnd().slice(0, 8)}` });
       return `${q.get('redirect_uri')}?${new URLSearchParams({ code, state: q.get('state'), iss: issuer })}`;
+    },
+    /** The OP answering an authorization request with an error (e.g. login_required to prompt=none). */
+    deny(authorizationUrl, error) {
+      let q = new URL(authorizationUrl).searchParams;
+      if (q.get('request_uri')) q = state.par.get(q.get('request_uri'));
+      state.lastAuthorize = new URLSearchParams(q);
+      return `${q.get('redirect_uri')}?${new URLSearchParams({ error, state: q.get('state'), iss: issuer })}`;
     },
   };
 }
@@ -492,6 +503,245 @@ describe('logout', () => {
   });
 });
 
+describe('AccountManager (one token cache for the browser, one active account per tab)', () => {
+  const managers = [];
+  afterEach(() => { for (const m of managers.splice(0)) m.close(); });
+  /** A "tab": its own tab store, sharing the browser-wide cache `shared`. */
+  const tab = async (client, shared, opts = {}) => {
+    const m = new AccountManager(client, { store: shared, tabStore: new MemoryTokenStore(), broadcast: false, ...opts });
+    managers.push(m);
+    return m.init();
+  };
+  const add = async (accounts, sub, request = (a) => a.addAccount()) => {
+    const { url } = await request(accounts);
+    return accounts.handleCallback(op.authorize(url, sub));
+  };
+
+  it('caches every account, but only the active account\'s tokens are reachable', async () => {
+    const client = await newClient();
+    const accounts = await tab(client, new MemoryTokenStore());
+    const activated = [];
+    accounts.on('activated', (a, prev) => activated.push([a?.sub, prev?.sub]));
+    const a = await add(accounts, 'alice');
+    assert.equal(a.added, true);
+    assert.equal(a.intent, 'add');
+    assert.equal(op.state.lastAuthorize.get('prompt'), 'login');
+    const b = await add(accounts, 'bob');
+    assert.equal(accounts.active.sub, 'bob');
+    assert.deepEqual(accounts.list().map((x) => [x.sub, x.status]), [['alice', 'signed-in'], ['bob', 'signed-in']]);
+    assert.equal((await accounts.getTokenSet()).claims.sub, 'bob');
+    assert.equal(accounts.getTokenSet.length, 1, 'getTokenSet takes no account key');
+    const calls = op.state.tokenCalls;
+    await accounts.activate(a.account.key);
+    assert.equal(op.state.tokenCalls, calls, 'activating a cached account sends nothing to the OP');
+    assert.equal((await accounts.getTokenSet()).claims.sub, 'alice');
+    assert.deepEqual(activated, [['alice', undefined], ['bob', 'alice'], ['alice', 'bob']]);
+    assert.notEqual(a.account.key, b.account.key);
+    assert.doesNotMatch(JSON.stringify(accounts.list()), /at-|rt-|eyJ/, 'the account list holds no token');
+  });
+
+  it('refreshes only the active account; a dormant account is refreshed when it is activated', async () => {
+    op = await createStubProvider({ accessTokenTtl: 2 });
+    const client = await newClient();
+    const accounts = await tab(client, new MemoryTokenStore(), { refreshSkewSec: 1 });
+    const alice = await add(accounts, 'alice');
+    await add(accounts, 'bob');
+    const refreshed = [];
+    accounts.on('refreshed', (x) => refreshed.push(x.sub));
+    await new Promise((r) => setTimeout(r, 2600));
+    assert.ok(refreshed.length >= 1);
+    assert.ok(refreshed.every((s) => s === 'bob'), 'only the active account is refreshed in the background');
+    const lastAuthCode = op.state.lastToken;
+    await accounts.activate(alice.account.key);
+    assert.equal(op.state.lastToken.get('grant_type'), 'refresh_token');
+    assert.notEqual(op.state.lastToken, lastAuthCode);
+    assert.equal((await accounts.getTokenSet()).claims.sub, 'alice');
+  });
+
+  it('runs onActivate with the account\'s tokens before it becomes active, and aborts on failure', async () => {
+    const client = await newClient();
+    let fail = false;
+    const seen = [];
+    const accounts = await tab(client, new MemoryTokenStore(), {
+      onActivate: async (account, { getTokenSet }) => {
+        seen.push([account.sub, (await getTokenSet()).claims.sub, accounts.activeKey === account.key]);
+        if (fail && account.sub === 'alice') throw new Error('catch-up failed');
+      },
+    });
+    const a = await add(accounts, 'alice');
+    await add(accounts, 'bob');
+    assert.deepEqual(seen, [['alice', 'alice', false], ['bob', 'bob', false]]);
+    seen.length = 0;
+    fail = true;
+    await assert.rejects(accounts.activate(a.account.key), /catch-up failed/);
+    assert.equal(accounts.active.sub, 'bob', 'the previous account is active again');
+  });
+
+  it('a signal that ends the account during onActivate stops its activation', async () => {
+    const client = await newClient();
+    let endIt = false;
+    const accounts = await tab(client, new MemoryTokenStore(), {
+      onActivate: async (account) => { if (endIt) await accounts.end(account.key, 'session-revoked while dormant'); },
+    });
+    const a = await add(accounts, 'alice');
+    await add(accounts, 'bob');
+    endIt = true;
+    await accounts.activate(a.account.key);
+    assert.equal(accounts.active.status, 'ended');
+    await assert.rejects(accounts.getTokenSet(), (e) => e.code === 'no_tokens');
+  });
+
+  it('tabs share the cache, each with its own active account; refreshes are not repeated across tabs', async () => {
+    const client = await newClient();
+    const shared = new MemoryTokenStore();
+    const tab1 = await tab(client, shared);
+    const alice = await add(tab1, 'alice');
+    const bob = await add(tab1, 'bob');
+    const tab2 = await tab(client, shared);
+    assert.equal(tab2.active, undefined, 'a new tab has no active account');
+    assert.deepEqual(tab2.list().map((x) => x.sub), ['alice', 'bob']);
+    const calls = op.state.tokenCalls;
+    await tab2.activate(alice.account.key);
+    assert.equal(op.state.tokenCalls, calls, 'no sign-in needed: the tokens are in the shared cache');
+    assert.equal((await tab2.getTokenSet()).claims.sub, 'alice');
+    assert.equal((await tab1.getTokenSet()).claims.sub, 'bob');
+    // Both tabs active on bob refresh at once: one token-endpoint call, the other tab reuses its result.
+    await tab2.activate(bob.account.key);
+    const before = op.state.tokenCalls;
+    const [r1, r2] = await Promise.all([tab1.refresh(), tab2.refresh()]);
+    assert.equal(op.state.tokenCalls, before + 1);
+    assert.equal(r1.access_token, r2.access_token);
+  });
+
+  it('a sign-out in one tab reaches the others (BroadcastChannel)', async () => {
+    const client = await newClient();
+    const shared = new MemoryTokenStore();
+    const tab1 = await tab(client, shared, { broadcast: true, storeKey: 'bc-test' });
+    const alice = await add(tab1, 'alice');
+    const tab2 = await tab(client, shared, { broadcast: true, storeKey: 'bc-test' });
+    await tab2.activate(alice.account.key);
+    const changed = new Promise((resolve) => tab2.once('change', resolve));
+    const keepAlive = setTimeout(() => {}, 5000); // the library's channel does not hold the event loop open
+    await tab1.signOut(alice.account.key, { endSession: false });
+    await changed;
+    clearTimeout(keepAlive);
+    assert.equal(tab2.active.status, 'signed-out');
+    await assert.rejects(tab2.getTokenSet(), (e) => e.code === 'no_tokens');
+  });
+
+  it('signing in again as a listed person updates that account instead of adding one', async () => {
+    const accounts = await tab(await newClient(), new MemoryTokenStore());
+    const first = await add(accounts, 'alice');
+    const again = await add(accounts, 'alice', (x) => x.signIn());
+    assert.equal(again.added, false);
+    assert.equal(accounts.list().length, 1);
+    assert.notEqual(again.account.sid, first.account.sid);
+  });
+
+  it('chooseAccount asks the OP for its picker; resume and reauthenticate name the account', async () => {
+    const accounts = await tab(await newClient(), new MemoryTokenStore());
+    const { account } = await add(accounts, 'alice');
+    const picker = await accounts.chooseAccount();
+    assert.equal(op.state.par.get(new URL(picker.url).searchParams.get('request_uri')).get('prompt'), 'select_account');
+    const { url } = await accounts.resume(account.key);
+    const pushed = op.state.par.get(new URL(url).searchParams.get('request_uri'));
+    assert.equal(pushed.get('prompt'), 'none');
+    assert.equal(pushed.get('login_hint'), 'alice');
+    assert.ok(pushed.get('id_token_hint'));
+    const done = await accounts.handleCallback(op.authorize(url, 'alice'));
+    assert.equal(done.intent, 'resume');
+    assert.equal(done.added, false);
+  });
+
+  it('refuses a sign-in as another person when an account was named (account_mismatch)', async () => {
+    const accounts = await tab(await newClient(), new MemoryTokenStore());
+    const { account } = await add(accounts, 'alice');
+    const { url } = await accounts.reauthenticate(account.key);
+    await assert.rejects(accounts.handleCallback(op.authorize(url, 'mallory')), (e) => e.code === 'account_mismatch');
+    assert.equal(accounts.list().length, 1);
+    assert.equal(op.state.refreshTokens.size, 1, 'the mismatched tokens were revoked');
+  });
+
+  it('reports which account a prompt=none failure was for', async () => {
+    const accounts = await tab(await newClient(), new MemoryTokenStore());
+    const { account } = await add(accounts, 'alice');
+    const { url } = await accounts.resume(account.key);
+    await assert.rejects(accounts.handleCallback(op.deny(url, 'login_required')), (e) => needsInteraction(e) && e.account.key === account.key && e.context.intent === 'resume');
+    const { url: url2 } = await accounts.signIn({ prompt: 'none' });
+    await assert.rejects(accounts.handleCallback(op.deny(url2, 'account_selection_required')), (e) => needsInteraction(e) && e.account === undefined);
+  });
+
+  it('signs one account out with a logout request naming its ID token; the others stay cached', async () => {
+    const client = await newClient({ postLogoutRedirectUri: 'https://app.test/' });
+    const left = [];
+    const accounts = await tab(client, new MemoryTokenStore(), { onLeave: async (x, { getTokenSet }) => left.push([x.sub, (await getTokenSet()).claims.sub]) });
+    const a = await add(accounts, 'alice');
+    const b = await add(accounts, 'bob');
+    const c = await add(accounts, 'carol');
+    await accounts.activate(b.account.key);
+    const bobTokens = await accounts.getTokenSet();
+    const logout = await accounts.signOut();
+    assert.deepEqual(left, [['bob', 'bob']]);
+    assert.equal(new URL(logout.url).searchParams.get('id_token_hint'), bobTokens.id_token);
+    assert.equal(op.state.accessTokens.has(bobTokens.access_token), false, 'revoked');
+    assert.equal(accounts.active.key, c.account.key, 'the most recently added signed-in account becomes active');
+    assert.deepEqual(accounts.list().map((x) => x.status), ['signed-in', 'signed-out', 'signed-in']);
+    assert.deepEqual(await client.completeEndSession(`https://app.test/?state=${logout.state}`), { context: { key: b.account.key } });
+    await assert.rejects(accounts.forget(a.account.key), (e) => e.code === 'account_signed_in');
+    await accounts.forget(b.account.key);
+    assert.equal(accounts.list().length, 2);
+    const all = await accounts.signOutAll();
+    assert.equal(new URL(all.url).searchParams.get('id_token_hint'), null);
+    assert.equal(accounts.active, undefined);
+  });
+
+  it('routes a security event to the account (and session) it is about, and ends that account only', async () => {
+    const accounts = await tab(await newClient(), new MemoryTokenStore());
+    const a = await add(accounts, 'alice');
+    const b = await add(accounts, 'bob');
+    assert.deepEqual(accounts.accountsForSubject(Subject.issSub(op.issuer, 'alice')).map((x) => x.sub), ['alice']);
+    assert.deepEqual(accounts.accountsForSubject(Subject.email('bob@example.com')).map((x) => x.sub), ['bob']);
+    const session = (sid) => Subject.complex({ user: Subject.issSub(op.issuer, 'alice'), session: Subject.opaque(sid) });
+    assert.equal(accounts.accountsForSubject(session('another-sid')).length, 0);
+    assert.equal(accounts.accountsForSubject(session(a.account.sid)).length, 1);
+    await accounts.activate(a.account.key);
+    const ended = [];
+    accounts.on('ended', (x, why) => ended.push([x.sub, why]));
+    await accounts.end(a.account.key, 'session-revoked');
+    assert.deepEqual(ended, [['alice', 'session-revoked']]);
+    assert.equal(accounts.get(a.account.key).status, 'ended');
+    assert.equal(accounts.active.key, b.account.key);
+    assert.equal((await accounts.getTokenSet()).claims.sub, 'bob');
+  });
+
+  it('a tab reactivates its account after a reload; unusable cached tokens become tokens-missing', async () => {
+    const client = await newClient();
+    const shared = new MemoryTokenStore();
+    const tabStore = new MemoryTokenStore();
+    const first = await tab(client, shared, { tabStore });
+    const a = await add(first, 'alice');
+    await add(first, 'bob');
+    first.close();
+    const cached = await shared.get(a.account.key);
+    await shared.set(a.account.key, { ...cached, refresh_token: undefined, expires_at: 1 });
+    const reloaded = await tab(client, shared, { tabStore });
+    assert.equal(reloaded.active.sub, 'bob');
+    assert.equal((await reloaded.getTokenSet()).claims.sub, 'bob');
+    await reloaded.activate(a.account.key);
+    assert.equal(reloaded.active.status, 'tokens-missing');
+  });
+
+  it('holds at most maxAccounts: forgets the account that left longest ago, else refuses', async () => {
+    const accounts = await tab(await newClient(), new MemoryTokenStore(), { maxAccounts: 2 });
+    const a = await add(accounts, 'alice');
+    await add(accounts, 'bob');
+    await assert.rejects(add(accounts, 'carol'), (e) => e.code === 'too_many_accounts');
+    await accounts.signOut(a.account.key, { endSession: false });
+    await add(accounts, 'carol');
+    assert.deepEqual(accounts.list().map((x) => x.sub), ['bob', 'carol']);
+  });
+});
+
 describe('dynamic client registration', () => {
   const request = () => ({ redirect_uris: [REDIRECT], grant_types: ['authorization_code'], id_token_signed_response_alg: 'ES256' });
 
@@ -605,6 +855,20 @@ describe('SSF / CAEP receiver (poll)', () => {
     await waitFor(() => stream(r).queue.size === 0, 'acknowledgement');
     await r.stop({ deleteStream: true });
     assert.equal(op.state.streams.size, 0);
+  });
+
+  it('catches up on the SETs queued while stopped before start({ catchUp }) resolves', async () => {
+    const r1 = await receiver({ pollIntervalMs: 60_000 });
+    await r1.start();
+    await r1.stop();
+    const s = stream(r1);
+    s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, Subject.issSub(op.issuer, 'alice')));
+    const got = [];
+    const r2 = await receiver({ streamId: s.stream_id, pollIntervalMs: 60_000 });
+    r2.onSessionRevoked((e) => got.push(e.name));
+    await r2.start({ catchUp: true });
+    assert.deepEqual(got, ['session-revoked']);
+    await r2.stop({ deleteStream: true });
   });
 
   it('calls every CAEP handler type via constructor config', async () => {

@@ -84,6 +84,49 @@ const { client } = await OIDCClient.register(metadata, {
 
 The registration always requests `token_endpoint_auth_method: none`. It fails if the OP issues a client secret, or registers a different ID token `alg` than requested (`registration_mismatch`). `readClientRegistration()` and `deleteClientRegistration()` implement RFC 7592.
 
+## Several accounts in one browser
+
+Some OPs keep several people signed in in one browser and let each request say which one it is for. iya-sts does this with `authn.multipleAccounts`, which is on by default. `AccountManager` is the relying party's side of that, and it follows two rules:
+
+- **One token cache for the whole browser.** Every signed-in account's tokens are cached until that account is signed out or its session ends. The cache is in IndexedDB by default (`IndexedDBTokenStore`) and shared by every tab of the origin. A trip to the OP, a reload or a new tab doesn't lose any account, and any tab can make any cached account active without a password.
+- **One active account per tab.** Only the active account's tokens can be reached: `getTokenSet()` takes no account. Only its tokens are refreshed in the background. The other accounts are **dormant**: their tokens stay stored, but they aren't refreshed or used. Two tabs can have different active accounts; the active account is remembered per tab, in `sessionStorage`.
+
+```js
+import { AccountManager, needsInteraction } from 'oidc-caep-client';
+
+const accounts = await new AccountManager(client, {
+  // Runs before an account becomes active, with that account's tokens: catch up on its signals.
+  onActivate: async (account, { getTokenSet }) => { /* e.g. receiver.start({ catchUp: true }) */ },
+  onDeactivate: (account) => { /* stop polling its stream */ },
+  onLeave: async (account, { getTokenSet }) => { /* signed out or ended: delete its stream */ },
+}).init();                                              // reactivates this tab's account after a reload
+
+location.assign((await accounts.signIn()).url);        // the OP decides (its picker if several are signed in)
+location.assign((await accounts.chooseAccount()).url); // prompt=select_account: always the OP's picker
+location.assign((await accounts.addAccount()).url);    // prompt=login: a fresh sign-in, added as an account
+
+// On the redirect URI: the account is cached and becomes this tab's active account.
+const { account, added } = await accounts.handleCallback(location.href);
+
+await accounts.activate(otherKey);                     // the previous account goes dormant
+const tokens = await accounts.getTokenSet();           // the ACTIVE account's, refreshed when due
+
+const logout = await accounts.signOut(key);            // revokes; id_token_hint ends that sid only
+```
+
+- **Activating** a dormant account refreshes its tokens first if they are due, then runs `onActivate`, and only then makes the account active. If a signal handled during `onActivate` ends the account, it becomes active with status `ended` and its tokens are never handed out. If the refresh or the hook fails, the previously active account is reactivated.
+- **Across tabs:**
+  - A refresh holds a Web Lock (`navigator.locks`), so two tabs never present the same rotating refresh token. A tab that was waiting for the lock reuses the tokens the other tab just got.
+  - Changes to the account list go through a lock too, and are announced to the other tabs (`BroadcastChannel`). A tab whose active account was signed out elsewhere sees its status change, and stops refreshing that account.
+- **A request that names an account only accepts that account.** `resume(key)` asks without a screen (`prompt=none`); `reauthenticate(key)` uses `prompt=login`. Both send `login_hint` and the cached `id_token_hint`. If the OP signs in somebody else, the callback refuses with `account_mismatch` and revokes the tokens it got. `createAuthorizationRequest({ expectedSub })` gives the same check to any request.
+- **`prompt=none` failures say which account they were for.** With several accounts signed in and nothing naming one, the OP answers `account_selection_required` (OpenID Connect Core §3.1.2.6). `needsInteraction(err)` covers it, along with `login_required`, `interaction_required` and `consent_required`. For `resume` and `reauth`, `err.account` is set.
+- **Signing out one account leaves the others signed in.** Its logout request names its ID token, so the OP ends that session only. If it was this tab's active account, the most recently added signed-in account becomes active. `signOutAll()` sends one logout request that names nobody, so the OP asks which accounts to end.
+- **Security events reach the account they are about.** `accountsForSubject(sub_id)` matches by `iss`/`sub`, `email` and `sid`. An SSF complex subject that names a session matches only the account holding that session. `end(key, reason)` drops the account's cached tokens; it stays listed as `ended`.
+- **Statuses:** `signed-in`, `tokens-missing` (the cached tokens expired and can't be refreshed; `resume()` gets new ones while the OP session lasts), `signed-out` and `ended`. Past `maxAccounts` (default 10), the account that left longest ago is forgotten. If every account is signed in, a new sign-in is refused (`too_many_accounts`).
+- **Streams are per person.** iya-sts gives a stream created with a person's token to that person, and sends it only events about them. So each account keeps its own stream. A tab polls only its active account's stream. A dormant account's stream keeps queueing at the transmitter, and `start({ catchUp: true })` in `onActivate` acts on what it queued before the account is used.
+
+The cache is readable by script in the page, like any browser storage, so pair it with DPoP. A DPoP-bound token is useless without the non-extractable key. Cached tokens last until the account is signed out, its session ends, or its refresh is refused; closing the browser doesn't clear them.
+
 ## CAEP: one handler per event
 
 ```js
@@ -107,6 +150,7 @@ caep
   .onError((err, ctx) => console.warn(ctx.phase, err));
 
 await caep.start();                                      // discover, create the stream, start polling
+// caep.start({ catchUp: true }) first acts on the SETs already queued (e.g. while the account was dormant)
 await caep.addSubject(Subject.issSub(user.iss, user.sub)); // events about this user only
 ```
 
@@ -150,11 +194,11 @@ In addition, a replayed `jti` is dropped.
 **`OIDCClient`**:
 
 - `discover(config)`, `fromMetadata(metadata, config)`, `register(metadata, clientMetadata, config)`
-- `createAuthorizationRequest(opts)`, `callback(url)`
+- `createAuthorizationRequest(opts)` (also `idTokenHint`, `expectedSub`, `context`), `callback(url)`, `completeAuthorization(url)` → `{ tokenSet, context }`
 - `refresh(tokenSet)`
 - `resourceHeaders(token, { method, url })`, `fetchResource(token, url, init)`
 - `userinfo(token, { expectedSub })`, `revoke(token, hint)`
-- `createEndSessionRequest(opts)`, `validateEndSessionCallback(url)`
+- `createEndSessionRequest(opts)` (also `context`), `validateEndSessionCallback(url)`, `completeEndSession(url)` → `{ context }`
 - `validateIdToken(jwt, opts)`
 - `securityFeatures`: a summary of the protections in effect
 
@@ -180,12 +224,20 @@ These are the `OIDCClient` config options:
 | `httpTimeoutMs` | 10000 |
 | `fetch` | global `fetch` |
 
-**`TokenManager(client, { store, refreshSkewSec, autoRefresh })`**:
+**`TokenManager(client, { store, refreshSkewSec, autoRefresh })`** (refreshes hold a lock shared by the tabs):
 
-- `set`, `get`, `getTokenSet`, `getAccessToken`, `refresh`, `delete(key, { revoke })`, `close`
+- `set(key, ts, { schedule })`, `get`, `getTokenSet`, `getAccessToken`, `refresh`, `schedule(key)`, `unschedule(key)`, `delete(key, { revoke })`, `close`
 - Events: `refreshed`, `refresh_error`, `expired`, `removed`
 
-**Stores:** `MemoryTokenStore` (default), `WebStorageTokenStore`, `TransactionStore`, `IndexedDBKeyStore` and `MemoryKeyStore` (for the DPoP key).
+**`AccountManager(client, { store, tabStore, refreshSkewSec, maxAccounts, rememberSignedOutDays, loginHint, onActivate, onDeactivate, onLeave, broadcast })`**:
+
+- `init`, `list`, `get`, `active`, `activeKey`, `identity(key)`, `accountsForSubject(subId)`
+- `signIn`, `chooseAccount`, `addAccount`, `resume(key)`, `reauthenticate(key)`, `handleCallback(url)`
+- `activate(key)`, `getTokenSet()` and `refresh()` (the active account's only), `signOut(key?, { revoke, endSession })`, `signOutAll`, `end(key, reason)`, `forget(key)`, `close`
+- Events: `added`, `updated`, `activated`, `refreshed`, `signed-out`, `ended`, `forgotten`, `activation_error`, `change`
+- Also exported: `needsInteraction(err)`, `INTERACTION_REQUIRED`, `accountKey(iss, sub)`
+
+**Stores:** `MemoryTokenStore` (default), `WebStorageTokenStore`, `IndexedDBTokenStore` (shared by the tabs), `TransactionStore`, `IndexedDBKeyStore` and `MemoryKeyStore` (for the DPoP key).
 
 ## Tests
 
