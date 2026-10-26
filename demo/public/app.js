@@ -103,7 +103,8 @@ function labelOf(a) {
   const saved = accountLabel(a.key);
   const display = String(saved.name || a.name || '').trim();
   const username = String(saved.username || a.preferred_username || '').trim();
-  if (display && username) return `${display} (${username})`;
+  // DisplayName (Username).
+  if (display && username && display !== username) return `${display} (${username})`;
   return display || username || a.email || a.sub || '—';
 }
 const initialOf = (a) => String(labelOf(a))[0]?.toUpperCase() ?? '?';
@@ -326,7 +327,10 @@ async function rememberProfile(account, getTokenSet) {
   try {
     info = await client.userinfo(set, { expectedSub: account.sub }) ?? {};
   } catch { /* the access token's username still labels the account */ }
-  const name = firstText(info.name, info.nickname, account.name);
+  // The display name is the full given name and surname (OIDC Core §5.1); `name` is the fallback, since a
+  // provider may fill it with something shorter.
+  const fullName = [info.given_name, info.family_name].map((v) => String(v ?? '').trim()).filter(Boolean).join(' ');
+  const name = firstText(fullName, info.name, info.nickname, account.name);
   const username = firstText(info.preferred_username, access.username, account.preferred_username);
   if (!name && !username) return;
   const all = store.get(LABELS_KEY, sessionStorage) ?? {};
