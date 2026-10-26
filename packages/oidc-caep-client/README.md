@@ -237,7 +237,7 @@ These are the `OIDCClient` config options:
 - Events: `added`, `updated`, `activated`, `refreshed`, `signed-out`, `ended`, `forgotten`, `activation_error`, `change`
 - Also exported: `needsInteraction(err)`, `INTERACTION_REQUIRED`, `accountKey(iss, sub)`
 
-**Stores:** `MemoryTokenStore` (default), `WebStorageTokenStore`, `IndexedDBTokenStore` (shared by the tabs), `TransactionStore`, `IndexedDBKeyStore` and `MemoryKeyStore` (for the DPoP key).
+**Stores:** `MemoryTokenStore` (default), `WebStorageTokenStore`, `IndexedDBTokenStore` (shared by the tabs), `TransactionStore`, `IndexedDBKeyStore` (non-extractable DPoP key), `WebStorageKeyStore` (extractable DPoP key in sessionStorage) and `MemoryKeyStore`.
 
 ## Tests
 

@@ -5,7 +5,7 @@ export { TokenManager } from './token-manager.js';
 export { AccountManager, accountKey, INTERACTION_REQUIRED, needsInteraction } from './accounts.js';
 export { TokenSet } from './token-set.js';
 export { IndexedDBTokenStore, MemoryTokenStore, WebStorageTokenStore, TransactionStore } from './stores.js';
-export { DPoPKey, DPoPNonceCache, IndexedDBKeyStore, MemoryKeyStore, DPOP_ALGS, htuOf } from './dpop.js';
+export { DPoPKey, DPoPNonceCache, IndexedDBKeyStore, MemoryKeyStore, WebStorageKeyStore, DPOP_ALGS, htuOf } from './dpop.js';
 export { discoverOpenIdProvider, discoverSSFTransmitter, oidcDiscoveryUrl, validateOpenIdProviderMetadata, clearDiscoveryCache } from './discovery.js';
 export { generateCodeVerifier, codeChallengeS256, randomToken } from './pkce.js';
 export { OIDCClientError, OAuthError, ValidationError, SETValidationError, SSFError } from './errors.js';

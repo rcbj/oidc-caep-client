@@ -8,7 +8,8 @@
   ],
   "scripts": {
     "test": "node --test packages/oidc-caep-client/test/*.test.js",
-    "start": "node demo/server.js"
+    "start": "node demo/server.js",
+    "register-iya-sts": "node scripts/register-iya-sts-client.mjs"
   },
   "engines": {
     "node": ">=20"

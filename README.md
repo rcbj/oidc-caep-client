@@ -5,7 +5,7 @@ An in-browser OpenID Connect client library, plus a demo single-page app. The li
 | Path | What it is |
 |---|---|
 | [`packages/oidc-caep-client`](packages/oidc-caep-client) | **The library**: Web APIs only, so it runs in browsers and in Node.js. See its [README](packages/oidc-caep-client/README.md) for the security features and the API. |
-| [`demo`](demo) | A single-page app, served by a small static server in one container. The OIDC client runs in the browser and is configured from the front page against your own OIDC provider. |
+| [`demo`](demo) | A single-page app, served by a small static server in one container. The OIDC client runs in the browser and reads `demo/public/oidc.json`. |
 
 ## Run the demo
 
@@ -13,32 +13,37 @@ An in-browser OpenID Connect client library, plus a demo single-page app. The li
 docker compose up --build
 ```
 
-Open **http://localhost:3000** and configure the identity provider on the front page:
+Open **http://localhost:3000**. The page loads [`demo/public/oidc.json`](demo/public/oidc.json) (served at `/oidc.json`): an OIDC metadata URL, a public `client_id`, and scopes. There is no configuration form. It fetches that metadata document from the browser, so the identity provider must allow CORS from this origin and the browser must trust the provider's certificate.
 
-1. **Metadata:** type the issuer (or its `/.well-known/openid-configuration` URL) and click **Fetch**, or paste the JSON document. The page fetches it from your browser, so the IdP must allow CORS from this origin. The summary shows what the IdP offers (PAR, DPoP, RFC 9207) and warns if it doesn't accept public clients.
-2. **Client:** register a **public** client (`token_endpoint_auth_method: none`) with the redirect URIs shown under **Register these with your IdP**, and enter its `client_id`. If the IdP allows Dynamic Client Registration, you can choose **Register a new client** instead. That also fixes the ID token signing algorithm, and can carry a software statement or initial access token.
-3. **Security:** these are on by default:
-   - **DPoP**, with the key kept non-extractable in IndexedDB;
-   - **PAR** whenever the IdP offers it;
-   - every signed-in account's tokens cached in **IndexedDB**, shared by the browser's tabs. Only the tab's active account's tokens are used. With DPoP on, cached tokens are useless without the key.
-4. **CAEP:** the transmitter issuer defaults to the OIDC issuer. The stream is created with the signed-in user's access token, carrying a DPoP proof when bound, and polled from the browser (RFC 8936). By default the user is added as the stream's only subject.
+The default file points at an iya-sts instance on `https://localhost:8081`, client `oidc-caep-demo`. Register that client in the default realm first:
 
-Then click **Sign in**. The page shows:
+```sh
+ADMIN_API_CLIENT_SECRET=… npm run register-iya-sts
+```
 
-- the **protections in effect**;
-- the token cache, with auto-refresh;
-- the raw and decoded **tokens**;
-- the CAEP stream;
-- a live **event log**.
+`scripts/register-iya-sts-client.mjs` mints a management API token the way `iya-sts/tests/tools/admin-api-token.js` does (`sts-management-api`, client credentials, audience `<issuer>/admin-api`) and creates the public client (`token_endpoint_auth_method: none`) with this page's redirect URIs, the file's scopes, and this origin allowed for CORS. The secret is `ADMIN_API_CLIENT_SECRET` or `STS_ADMIN_API_CLIENT_SECRET`. Pass `--public-url` when the demo is not on `http://localhost:3000`.
+
+These stay on without a setting in the file:
+
+- **DPoP**, with the key kept in this tab's session storage;
+- **PAR** whenever the IdP offers it;
+- every signed-in account's tokens cached in this tab's **session storage**. Only the tab's active account's tokens are used. Closing the tab clears the cache. The configuration, stream ids and event log stay in local storage.
+- **CAEP:** the transmitter issuer is the OIDC issuer. The stream is created with the signed-in user's access token, carrying a DPoP proof when bound, and polled from the browser (RFC 8936). When that token includes `ssf.manage`, the user is added as the stream's only subject. `ssf.read` only polls.
+
+Then click **Sign in**. The page has two tabs, and every pane on the selected tab stays visible.
+
+**Identity** shows sign-in, the protections in effect, the session, the token cache, and the raw and decoded tokens.
+
+**CAEP events** shows the stream and the live event log.
 
 It reacts to events about the signed-in user: `session-revoked` signs them out, `token-claims-change` refreshes their tokens, an assurance drop requires step-up, and so on.
 
 ### Several accounts
 
-You can be signed in with several accounts at once, as iya-sts allows with `authn.multipleAccounts` (its docs/multiple-accounts.md). The library caches every signed-in account's tokens for the whole browser, shared by its tabs. Each tab has **one active account**: only its tokens are used and refreshed, and only its CAEP stream is polled. The other accounts are **dormant**.
+You can be signed in with several accounts at once, as iya-sts allows with `authn.multipleAccounts` (its docs/multiple-accounts.md). This page keeps every signed-in account's tokens in the tab's session storage. Each tab has **one active account**: only its tokens are used and refreshed, and only its CAEP stream is polled. The other accounts are **dormant**.
 
-- **Switch account**, in the menu under your name or in the **Accounts** card, makes another cached account active in this tab, with no password. Before the switch completes, the account's stream catches up on the signals queued while it was dormant. If one of them ended its session, the account shows as ended and its tokens are never used. The log marks such signals *(caught up on activation)*.
-- **Several tabs** can have different active accounts. A new tab lists the accounts already signed in, and any of them can become its active account without signing in again.
+- **Switch account**, in the menu under your name, makes another cached account active in this tab, with no password. Before the switch completes, the account's stream catches up on the signals queued while it was dormant. If one of them ended its session, the account shows as ended and its tokens are never used. The log marks such signals *(caught up on activation)*.
+- **Each tab has its own cache.** A new tab starts signed out. Closing the tab clears its tokens and its DPoP key.
 - **Sign in with another account** is a fresh sign-in (`prompt=login`) that adds an account. **Choose at the identity provider** opens the IdP's account picker (`prompt=select_account`).
 - In the **event log**, **This account** shows the active account's signals and **All accounts** shows the signals every tab has received, each marked with its account. A badge counts the signals for another account that this tab hasn't seen yet.
 - A signal that ends a session ends **that account only**, and offers **Sign in again**. That sign-in names the account (`login_hint`/`id_token_hint`) and refuses a sign-in as anybody else. A `session-revoked` naming another of the person's sessions (`sid`) is ignored.
@@ -46,7 +51,7 @@ You can be signed in with several accounts at once, as iya-sts allows with `auth
 
 ### What the server does
 
-`demo/server.js` only serves static files: the SPA (also at `/callback`), the library as ES modules, and `jose`'s browser build, with no bundler. It holds no tokens and no configuration. It sets the headers a browser-based OAuth client needs:
+`demo/server.js` only serves static files: the SPA (also at `/callback`), `/oidc.json`, the library as ES modules, and `jose`'s browser build, with no bundler. It holds no tokens. The OIDC settings live in the configuration file. It sets the headers a browser-based OAuth client needs:
 
 - **CSP:** scripts only from this origin, with the one inline import map allowed by its SHA-256 hash; no `eval`; no framing.
 - **`Referrer-Policy: no-referrer`:** the authorization code arrives in the URL and must not leak.
@@ -64,7 +69,7 @@ npm install
 npm test
 ```
 
-There are 52 tests. They run against a strict in-memory OP stub that enforces public clients, PKCE, PAR and DPoP (proof signature, `htm`/`htu`/`ath`, key binding and nonces), injected through the library's `fetch` option. They cover:
+There are 53 tests. They run against a strict in-memory OP stub that enforces public clients, PKCE, PAR and DPoP (proof signature, `htm`/`htu`/`ath`, key binding and nonces), injected through the library's `fetch` option. They cover:
 
 - **State:** single use, expiry, issuer binding, missing and tampered values.
 - **Front channel:** injected tokens, repeated parameters, RFC 9207 `iss`, error ordering.
