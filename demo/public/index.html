@@ -21,181 +21,50 @@
 
   <div class="banner-area" id="banners" aria-live="polite"></div>
 
-  <main class="layout">
-    <div class="col">
-      <!-- Identity provider configuration -->
-      <section class="card" id="config-card">
-        <div class="card-head">
-          <h2>Identity provider</h2>
-          <span class="pill" id="config-pill">Not configured</span>
-        </div>
+  <div class="page-tabs" role="tablist" aria-label="Sections">
+    <button class="page-tab" id="tab-identity" type="button" role="tab" data-page="identity" aria-selected="true" aria-controls="panel-identity">Identity</button>
+    <button class="page-tab" id="tab-caep" type="button" role="tab" data-page="caep" aria-selected="false" aria-controls="panel-caep" tabindex="-1">CAEP events</button>
+  </div>
 
-        <div id="config-summary" hidden>
-          <dl class="kv" id="config-summary-kv"></dl>
-          <div class="actions">
-            <button class="btn ghost" id="btn-edit-config" type="button">Edit configuration</button>
-          </div>
-        </div>
-
-        <form id="config-form" novalidate>
-          <p class="muted small intro">Point this app at any OpenID Connect Core 1.0 provider. It runs entirely in this browser as a <strong>public client</strong> (no client secret) and configures itself from the provider's metadata document.</p>
-
-          <label for="discovery-url">Issuer or discovery URL</label>
-          <div class="inline">
-            <input id="discovery-url" type="url" placeholder="https://idp.example.com/.well-known/openid-configuration" autocomplete="url">
-            <button class="btn" id="btn-fetch" type="button">Fetch</button>
-          </div>
-          <p class="hint" id="fetch-result" aria-live="polite"></p>
-
-          <label for="metadata">OpenID Provider metadata document <span class="req">required</span></label>
-          <textarea id="metadata" rows="9" spellcheck="false" placeholder='Paste the JSON from /.well-known/openid-configuration, or fetch it above.'></textarea>
-          <p class="hint" id="metadata-summary"></p>
-
-          <div class="mode" role="radiogroup" aria-label="Client registration">
-            <label class="mode-opt"><input type="radio" name="reg-mode" value="static" checked> <span><strong>Use an existing client</strong><span class="muted small">A public client_id you already registered</span></span></label>
-            <label class="mode-opt" id="dcr-opt"><input type="radio" name="reg-mode" value="dynamic"> <span><strong>Register a new client</strong><span class="muted small" id="dcr-note">OpenID Connect Dynamic Client Registration</span></span></label>
-          </div>
-
-          <div id="static-fields">
-            <label for="client-id">client_id <span class="req">required</span></label>
-            <input id="client-id" autocomplete="off" spellcheck="false">
-          </div>
-
-          <div id="dynamic-fields" class="grid2" hidden>
-            <div>
-              <label for="client-name">client_name</label>
-              <input id="client-name" placeholder="oidc-caep-client demo" spellcheck="false">
-            </div>
-            <div>
-              <label for="initial-token">Initial access token <span class="muted">if the IdP requires one</span></label>
-              <input id="initial-token" type="password" autocomplete="off" spellcheck="false">
-            </div>
-            <div class="span2">
-              <label for="software-statement">Software statement <span class="muted">signed JWT the IdP trusts (RFC 7591 §2.3), if required</span></label>
-              <textarea id="software-statement" rows="3" spellcheck="false" placeholder="eyJhbGciOi…"></textarea>
-            </div>
-          </div>
-
-          <label for="id-token-alg">ID token signing alg</label>
-          <select id="id-token-alg"><option value="">Automatic (RS256)</option></select>
-          <p class="hint" id="alg-hint"></p>
-
-          <fieldset class="security">
-            <legend>Security</legend>
-            <label class="check"><input type="checkbox" id="use-dpop" checked> DPoP: bind tokens to a non-extractable key in this browser (RFC 9449)</label>
-            <div class="grid2">
-              <div>
-                <label for="par-mode">Pushed Authorization Requests (RFC 9126)</label>
-                <select id="par-mode">
-                  <option value="auto">When the IdP offers it</option>
-                  <option value="always">Always</option>
-                  <option value="never">Never (unless the IdP requires it)</option>
-                </select>
-              </div>
-            </div>
-            <p class="hint" id="storage-hint"></p>
-          </fieldset>
-
-          <details class="advanced">
-            <summary>Advanced OIDC settings</summary>
-            <div class="grid2">
-              <div>
-                <label for="scope">Scope</label>
-                <input id="scope" placeholder="openid profile email offline_access" spellcheck="false">
-              </div>
-              <div>
-                <label for="resource">Resource indicator (RFC 8707) <span class="muted">optional</span></label>
-                <input id="resource" placeholder="https://api.example.com/" spellcheck="false">
-              </div>
-              <div>
-                <label for="acr-values">acr_values <span class="muted">optional, enforced</span></label>
-                <input id="acr-values" placeholder="e.g. mfa" spellcheck="false">
-              </div>
-            </div>
-          </details>
-
-          <fieldset class="caep">
-            <legend><label class="check"><input type="checkbox" id="caep-enabled" checked> Subscribe to CAEP events (Shared Signals, poll)</label></legend>
-            <p class="hint">Each account's stream is created with its own access token. A tab polls only its active account's stream (RFC 8936); a dormant account's stream keeps queueing, and is caught up when the account is activated. A browser cannot receive pushed events.</p>
-            <div class="grid2">
-              <div>
-                <label for="ssf-issuer">SSF transmitter issuer</label>
-                <input id="ssf-issuer" placeholder="Filled from the OIDC issuer" spellcheck="false">
-                <p class="hint" id="ssf-issuer-hint"></p>
-              </div>
-              <div>
-                <label for="ssf-max-age">Max event age (seconds)</label>
-                <input id="ssf-max-age" type="number" min="0" step="60" value="3600">
-              </div>
-              <div>
-                <label for="ssf-subject">Subject format</label>
-                <select id="ssf-subject">
-                  <option value="iss_sub">iss_sub</option>
-                  <option value="email">email</option>
-                </select>
-              </div>
-            </div>
-            <label class="check"><input type="checkbox" id="ssf-only-users" checked> Only receive events about the signed-in user (add them as a stream subject)</label>
-            <p class="field-label">Events to request</p>
-            <div class="event-picks" id="ssf-events-pick"></div>
-          </fieldset>
-
-          <div class="register">
-            <p class="small"><strong>Register these with your IdP</strong> (public client, token_endpoint_auth_method <code>none</code>)</p>
-            <dl class="kv" id="register-urls"></dl>
-          </div>
-
-          <p class="form-error" id="config-error" role="alert" hidden></p>
-          <div class="actions">
-            <button class="btn primary" id="btn-save" type="submit">Save &amp; connect</button>
-            <button class="btn ghost" id="btn-cancel" type="button" hidden>Cancel</button>
-          </div>
-        </form>
-      </section>
-
-      <!-- Signed-out hero -->
-      <section class="card hero" id="signed-out" hidden>
-        <p class="eyebrow">OpenID Connect + Shared Signals</p>
-        <h1 id="hero-title">Continuous access, in real time.</h1>
+  <div id="panel-identity" class="tab-panel" role="tabpanel" aria-labelledby="tab-identity">
+    <details class="card pane" id="signed-out">
+      <summary class="card-head">
+        <span class="pane-title"><h1 id="hero-title">Sign in</h1></span>
+      </summary>
+      <div class="pane-body">
+        <p class="eyebrow">OpenID Connect</p>
         <p class="muted" id="hero-text"></p>
         <div class="actions" id="hero-actions"></div>
-      </section>
+      </div>
+    </details>
 
-      <!-- Every account signed in through this page -->
-      <section class="card" id="accounts-card" hidden>
-        <div class="card-head">
-          <h2>Accounts</h2>
-          <span class="muted small" id="accounts-count"></span>
-        </div>
-        <ul class="accounts" id="accounts-list"></ul>
-        <p class="hint" id="accounts-hint"></p>
-        <div class="actions">
-          <button class="btn" id="btn-add-account" type="button">Sign in with another account</button>
-          <button class="btn ghost" id="btn-choose-account" type="button">Choose at the identity provider</button>
-        </div>
-      </section>
-
-      <section class="card" id="security-card" hidden>
-        <div class="card-head">
-          <h2>Protections in effect</h2>
-        </div>
+    <details class="card pane" id="security-card">
+      <summary class="card-head">
+        <span class="pane-title"><h2>Protections in effect</h2></span>
+      </summary>
+      <div class="pane-body">
+        <p class="muted" id="security-empty">The identity provider has not been reached yet.</p>
         <ul class="checks" id="security-list"></ul>
-      </section>
+      </div>
+    </details>
 
-      <!-- Signed-in session -->
-      <section class="card" id="session-card" hidden>
-        <div class="card-head">
-          <h2 id="session-title">Session</h2>
-          <span class="pill ok" id="session-pill">Active</span>
-        </div>
-        <dl class="claims" id="claims"></dl>
-      </section>
+    <details class="card pane" id="session-card">
+      <summary class="card-head">
+        <span class="pane-title"><h2 id="session-title">Session</h2></span>
+        <span class="pill" id="session-pill">Signed out</span>
+      </summary>
+      <div class="pane-body">
+        <p class="muted" id="session-empty">No one is signed in on this tab.</p>
+        <dl class="claims" id="claims" hidden></dl>
+      </div>
+    </details>
 
-      <section class="card" id="token-card" hidden>
-        <div class="card-head">
-          <h2>Token cache</h2>
-          <span class="muted small" id="refresh-count"></span>
-        </div>
+    <details class="card pane" id="token-card">
+      <summary class="card-head">
+        <span class="pane-title"><h2>Token cache</h2></span>
+        <span class="muted small" id="refresh-count"></span>
+      </summary>
+      <div class="pane-body">
         <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-fill"></div><div class="meter-skew" id="meter-skew"></div></div>
         <div class="token-row">
           <div><div class="stat" id="expires-in">—</div><div class="muted small">access token expires in</div></div>
@@ -203,38 +72,42 @@
           <div><div class="stat" id="last-refresh">—</div><div class="muted small">last refresh</div></div>
         </div>
         <div class="actions">
-          <button class="btn" id="btn-userinfo">Call UserInfo</button>
-          <button class="btn ghost" id="btn-refresh">Force refresh</button>
+          <button class="btn" id="btn-userinfo" disabled>Call UserInfo</button>
+          <button class="btn ghost" id="btn-refresh" disabled>Force refresh</button>
         </div>
         <pre class="output" id="userinfo-out" hidden></pre>
-      </section>
+      </div>
+    </details>
 
-      <section class="card" id="tokens-card" hidden>
-        <div class="card-head">
-          <h2>Tokens</h2>
-          <div class="seg" role="tablist" aria-label="Which tokens">
-            <button type="button" role="tab" class="seg-btn tok-seg on" data-which="signIn" aria-selected="true">At sign-in</button>
-            <button type="button" role="tab" class="seg-btn tok-seg" data-which="current" aria-selected="false">Current</button>
-          </div>
+    <details class="card pane" id="tokens-card">
+      <summary class="card-head">
+        <span class="pane-title"><h2>Tokens</h2></span>
+      </summary>
+      <div class="pane-body">
+        <div class="seg" role="tablist" aria-label="Which tokens">
+          <button type="button" role="tab" class="seg-btn tok-seg on" data-which="signIn" aria-selected="true">At sign-in</button>
+          <button type="button" role="tab" class="seg-btn tok-seg" data-which="current" aria-selected="false">Current</button>
         </div>
-        <p class="muted small" id="tokens-note"></p>
+        <p class="muted small" id="tokens-note">No tokens until someone is signed in on this tab.</p>
         <div id="tokens-body"></div>
-      </section>
+      </div>
+    </details>
+  </div>
 
-      <section class="card" id="stream-card">
-        <div class="card-head">
-          <h2 id="stream-title">CAEP stream</h2>
-          <span class="pill" id="ssf-pill">…</span>
-        </div>
-        <dl class="kv" id="ssf-info"></dl>
-        <div class="chips" id="ssf-events"></div>
-        <p class="form-error" id="ssf-error" hidden></p>
-        <div class="actions">
-          <button class="btn ghost" id="btn-verify">Request verification event</button>
-          <button class="btn ghost" id="btn-reconnect">Reconnect stream</button>
-        </div>
-      </section>
-    </div>
+  <div id="panel-caep" class="tab-panel" role="tabpanel" aria-labelledby="tab-caep" hidden>
+    <section class="card" id="stream-card">
+      <div class="card-head">
+        <h2 id="stream-title">CAEP stream</h2>
+        <span class="pill" id="ssf-pill">…</span>
+      </div>
+      <dl class="kv" id="ssf-info"></dl>
+      <div class="chips" id="ssf-events"></div>
+      <p class="form-error" id="ssf-error" hidden></p>
+      <div class="actions">
+        <button class="btn ghost" id="btn-verify">Request verification event</button>
+        <button class="btn ghost" id="btn-reconnect">Reconnect stream</button>
+      </div>
+    </section>
 
     <section class="card log-card">
       <div class="card-head">
@@ -245,12 +118,13 @@
             <button type="button" role="tab" class="seg-btn log-seg" data-view="all">All accounts<span id="log-all-count"></span></button>
           </div>
           <span class="live" id="live"><span class="dot"></span>polling</span>
+          <button class="btn ghost" id="btn-clear-log" type="button">Clear</button>
         </div>
       </div>
       <ol class="log" id="log"></ol>
       <p class="muted empty" id="log-empty">No CAEP events yet. Sign in, then trigger an event at your identity provider (for example, revoke your session).</p>
     </section>
-  </main>
+  </div>
 
   <template id="log-item">
     <li class="log-item">

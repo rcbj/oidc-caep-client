@@ -3,8 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { calculateJwkThumbprint, decodeProtectedHeader, exportJWK, generateKeyPair, importJWK, jwtVerify, SignJWT } from 'jose';
 import {
-  AccountManager, CAEP, clearDiscoveryCache, needsInteraction, OAuthError, OIDCClient, registerClient, SETValidationError, SSF, SSFReceiver, Subject,
-  MemoryTokenStore, subjectMatches, TokenManager, TransactionStore,
+  AccountManager, CAEP, clearDiscoveryCache, DPoPKey, needsInteraction, OAuthError, OIDCClient, registerClient, SETValidationError, SSF, SSFReceiver, Subject,
+  MemoryTokenStore, subjectMatches, TokenManager, TransactionStore, WebStorageKeyStore,
 } from '../src/index.js';
 import { onceEvent } from '../src/util.js';
 
@@ -462,6 +462,27 @@ describe('ID token', () => {
 });
 
 describe('DPoP (RFC 9449)', () => {
+  it('keeps an extractable DPoP key in session storage and reloads the same thumbprint', async () => {
+    const map = new Map();
+    const storage = {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k, v) => map.set(k, String(v)),
+      removeItem: (k) => map.delete(k),
+    };
+    const store = new WebStorageKeyStore({ storage, key: 'dpop' });
+    const key = await DPoPKey.loadOrCreate(store);
+    assert.equal(key.keyPair.privateKey.extractable, true);
+    const saved = JSON.parse(storage.getItem('dpop'));
+    assert.equal(saved.alg, 'ES256');
+    assert.equal(typeof saved.privateJwk.d, 'string');
+    const again = await DPoPKey.loadOrCreate(new WebStorageKeyStore({ storage, key: 'dpop' }));
+    assert.equal(again.thumbprint, key.thumbprint);
+    const proof = await again.proof({ method: 'POST', url: 'https://op.test/token' });
+    const { payload, protectedHeader } = await jwtVerify(proof, await importJWK(saved.publicJwk, 'ES256'), { typ: 'dpop+jwt' });
+    assert.equal(payload.htm, 'POST');
+    assert.equal(protectedHeader.jwk.x, saved.publicJwk.x);
+  });
+
   it('binds the code and tokens to a non-extractable key and uses it for resources and refresh', async () => {
     const client = await newClient({ dpop: true });
     assert.equal(client.dpopKey.alg, 'ES256');

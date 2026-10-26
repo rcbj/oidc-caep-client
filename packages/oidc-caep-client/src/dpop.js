@@ -1,4 +1,4 @@
-import { calculateJwkThumbprint, exportJWK, generateKeyPair, SignJWT } from 'jose';
+import { calculateJwkThumbprint, exportJWK, generateKeyPair, importJWK, SignJWT } from 'jose';
 import { base64url, digest } from './util.js';
 
 /** DPoP proof algorithms this library can create, in preference order. */
@@ -9,8 +9,9 @@ export const DPOP_ALGS = Object.freeze(['ES256', 'ES384', 'PS256', 'RS256']);
  *
  * The private key is generated NON-EXTRACTABLE: script running in the page (including injected script)
  * can ask it to sign while the page is open, but can never read it out, so a stolen access or refresh
- * token is useless anywhere else. Keep the same key for the lifetime of the tokens it binds; use
- * `IndexedDBKeyStore` to keep it across page loads.
+ * token is useless anywhere else. Keep the same key for the lifetime of the tokens it binds.
+ * `IndexedDBKeyStore` keeps that non-extractable key across page loads. `WebStorageKeyStore`
+ * keeps an extractable copy in sessionStorage for this tab, which is what Web Storage can hold.
  */
 export class DPoPKey {
   #privateKey;
@@ -29,11 +30,12 @@ export class DPoPKey {
   }
 
   /**
-   * Builds a key from a CryptoKeyPair, generating a new non-extractable pair if none is given.
-   * @param {{ alg?: string, keyPair?: CryptoKeyPair }} [opts]
+   * Builds a key from a CryptoKeyPair, generating a new pair if none is given.
+   * Generated keys are non-extractable unless `extractable` is set, which sessionStorage requires.
+   * @param {{ alg?: string, keyPair?: CryptoKeyPair, extractable?: boolean }} [opts]
    */
-  static async create({ alg = 'ES256', keyPair } = {}) {
-    const pair = keyPair ?? await generateKeyPair(alg, { extractable: false });
+  static async create({ alg = 'ES256', keyPair, extractable = false } = {}) {
+    const pair = keyPair ?? await generateKeyPair(alg, { extractable });
     const { kty, crv, x, y, n, e } = await exportJWK(pair.publicKey);
     const publicJwk = Object.fromEntries(Object.entries({ kty, crv, x, y, n, e }).filter(([, v]) => v !== undefined));
     const thumbprint = await calculateJwkThumbprint(publicJwk, 'sha256');
@@ -50,7 +52,7 @@ export class DPoPKey {
   static async loadOrCreate(store, { alg = 'ES256' } = {}) {
     const held = await store.get();
     if (held?.keyPair && held.alg === alg) return DPoPKey.create({ alg, keyPair: held.keyPair });
-    const key = await DPoPKey.create({ alg });
+    const key = await DPoPKey.create({ alg, extractable: store.extractable === true });
     await store.set({ alg, keyPair: key.keyPair });
     return key;
   }
@@ -141,6 +143,53 @@ export class IndexedDBKeyStore {
   get() { return this.#tx('readonly', (s) => s.get(this.#key)); }
   set(value) { return this.#tx('readwrite', (s) => s.put(value, this.#key)); }
   delete() { return this.#tx('readwrite', (s) => s.delete(this.#key)); }
+}
+
+/**
+ * Keeps one DPoP key pair in Web Storage, sessionStorage by default. Storage holds strings, so the
+ * private key is a JWK and therefore extractable. It survives a reload and the round trip to the
+ * identity provider, and it is cleared when the tab closes. `extractable` is what `DPoPKey.loadOrCreate`
+ * reads when it has to generate a key this store can keep.
+ */
+export class WebStorageKeyStore {
+  #storage;
+  #key;
+
+  /** @param {{ storage?: Storage, key?: string }} [opts] */
+  constructor({ storage = globalThis.sessionStorage, key = 'oidc-caep-client:dpop-key' } = {}) {
+    if (!storage) throw new TypeError('Web Storage is not available here');
+    this.extractable = true;
+    this.#storage = storage;
+    this.#key = key;
+  }
+
+  async get() {
+    const raw = this.#storage.getItem(this.#key);
+    if (!raw) return undefined;
+    const saved = JSON.parse(raw);
+    if (!saved?.alg || !saved.privateJwk || !saved.publicJwk) return undefined;
+    const [privateKey, publicKey] = await Promise.all([
+      importJWK(saved.privateJwk, saved.alg, { extractable: true }),
+      importJWK(saved.publicJwk, saved.alg),
+    ]);
+    return { alg: saved.alg, keyPair: { privateKey, publicKey } };
+  }
+
+  async set(value) {
+    const privateKey = value?.keyPair?.privateKey;
+    if (!privateKey?.extractable) {
+      throw new TypeError('WebStorageKeyStore can only store an extractable private key');
+    }
+    const [privateJwk, publicJwk] = await Promise.all([
+      exportJWK(privateKey),
+      exportJWK(value.keyPair.publicKey),
+    ]);
+    this.#storage.setItem(this.#key, JSON.stringify({ alg: value.alg, privateJwk, publicJwk }));
+  }
+
+  async delete() {
+    this.#storage.removeItem(this.#key);
+  }
 }
 
 /** Keeps a DPoP key in memory only (a new key after every page load). */

@@ -1,6 +1,6 @@
 // CAEP demo SPA. The OIDC client runs HERE, in the browser, as a public client: Authorization Code + PKCE,
-// state/nonce, PAR, DPoP with a non-extractable key, RFC 9207, token caching with auto-refresh, and a CAEP
-// (Shared Signals) stream polled with the active account's access token.
+// state/nonce, PAR, DPoP with the key in session storage, RFC 9207, token caching with auto-refresh, and a
+// CAEP (Shared Signals) stream polled with the active account's access token.
 //
 // Several accounts can be signed in at once (an OP such as iya-sts with authn.multipleAccounts keeps one
 // session per person per browser). The library caches every account's tokens for the whole browser, shared
@@ -9,24 +9,37 @@
 // signals queued while it was dormant.
 import { decodeJwt, decodeProtectedHeader } from 'jose';
 import {
-  AccountManager, CAEP, discoverSSFTransmitter, IndexedDBKeyStore, MemoryKeyStore, needsInteraction, OIDCClient,
+  AccountManager, CAEP, MemoryKeyStore, MemoryTokenStore, needsInteraction, OIDCClient,
   oidcDiscoveryUrl, SSFReceiver, Subject, subjectMatches, SUPPORTED_ID_TOKEN_ALGS, validateOpenIdProviderMetadata,
+  WebStorageKeyStore, WebStorageTokenStore,
 } from 'oidc-caep-client';
 
 const $ = (id) => document.getElementById(id);
 const ORIGIN = location.origin;
 const URLS = { redirectUri: `${ORIGIN}/callback`, postLogoutRedirectUri: `${ORIGIN}/` };
-const CAEP_EVENT_NAMES = Object.values(CAEP).map((u) => u.split('/').pop());
 const DEFAULT_CAEP_EVENTS = ['session-revoked', 'credential-change', 'token-claims-change', 'assurance-level-change', 'device-compliance-change'];
 const CONFIG_KEY = 'oidc-caep-demo.config';
-const FORM_STORE_KEY = 'oidc-caep-demo.config-form';
 // Shared by the tabs (localStorage): each account's stream id, and the signals every tab has received.
 const STREAMS_KEY = 'oidc-caep-demo.stream-ids';
 const LOG_KEY = 'oidc-caep-demo.event-log';
 // Per tab (sessionStorage): which log view, and when this tab last looked at each account's signals.
 const LOG_VIEW_KEY = 'oidc-caep-demo.log-view';
+const PAGE_TAB_KEY = 'oidc-caep-demo.page-tab';
 const SEEN_KEY = 'oidc-caep-demo.seen';
-const NOT_STORED = new Set(['initial-token']);
+const LABELS_KEY = 'oidc-caep-demo.labels';
+// Kept when the configuration file changes. DPoP, PAR and the CAEP subscription used to be form fields.
+const CLIENT_DEFAULTS = {
+  dpop: true,
+  par: 'auto',
+  caep: {
+    enabled: true,
+    transmitterIssuer: '',
+    maxSetAgeSec: 3600,
+    subjectFormat: 'iss_sub',
+    onlyUser: true,
+    events: DEFAULT_CAEP_EVENTS,
+  },
+};
 
 /** @type {OIDCClient|undefined} */ let client;
 /** @type {AccountManager|undefined} */ let accounts;
@@ -80,7 +93,19 @@ const describe = (err) => {
   return `${msg}${status}${detail}`.slice(0, 600);
 };
 
-const labelOf = (a) => a ? a.name ?? a.preferred_username ?? a.email ?? a.sub : '—';
+/** Display name and username learned from UserInfo, keyed by account. The ID token's subject is not a name. */
+function accountLabel(key) {
+  const all = store.get(LABELS_KEY, sessionStorage) ?? {};
+  return all[key] ?? {};
+}
+function labelOf(a) {
+  if (!a) return '—';
+  const saved = accountLabel(a.key);
+  const display = String(saved.name || a.name || '').trim();
+  const username = String(saved.username || a.preferred_username || '').trim();
+  if (display && username) return `${display} (${username})`;
+  return display || username || a.email || a.sub || '—';
+}
 const initialOf = (a) => String(labelOf(a))[0]?.toUpperCase() ?? '?';
 const stateOf = (key) => {
   if (!perAccount.has(key)) perAccount.set(key, { refreshCount: 0, lastRefresh: undefined, stepUp: undefined, notices: [] });
@@ -100,35 +125,36 @@ const STATUS = {
 // Configuration → client
 // ---------------------------------------------------------------------------
 
-async function applyConfig(cfg, { register } = {}) {
+async function applyConfig(cfg) {
   accounts?.close();
   const metadata = typeof cfg.metadata === 'string' ? JSON.parse(cfg.metadata) : cfg.metadata;
   validateOpenIdProviderMetadata(metadata);
-  const common = {
+  if (!cfg.clientId) throw new Error('client_id is required');
+  // This tab only. sessionStorage survives the redirect to the IdP and a reload, and closes with the tab.
+  // localStorage is left for the configuration, the stream ids and the event log.
+  const tabStorage = globalThis.sessionStorage;
+  client = await OIDCClient.fromMetadata(metadata, {
     redirectUri: URLS.redirectUri,
     postLogoutRedirectUri: URLS.postLogoutRedirectUri,
     scope: cfg.scope || undefined,
     resource: cfg.resource || undefined,
     par: cfg.par ?? 'auto',
-    dpop: cfg.dpop ? { keyStore: typeof indexedDB === 'undefined' ? new MemoryKeyStore() : new IndexedDBKeyStore() } : false,
+    dpop: cfg.dpop ? { keyStore: tabStorage ? new WebStorageKeyStore() : new MemoryKeyStore() } : false,
     idTokenSignedResponseAlg: cfg.idTokenAlg || pickIdTokenAlg(metadata),
-  };
-  if (register) {
-    const { client: registered, registration } = await OIDCClient.register(metadata, register.request, { ...common, initialAccessToken: register.initialAccessToken });
-    client = registered;
-    cfg = { ...cfg, clientId: registration.client_id, idTokenAlg: client.config.idTokenSignedResponseAlg, registeredAt: Date.now() };
-  } else {
-    if (!cfg.clientId) throw new Error('client_id is required');
-    client = await OIDCClient.fromMetadata(metadata, { ...common, clientId: cfg.clientId });
-  }
+    clientId: cfg.clientId,
+  });
   config = { ...cfg, metadata };
   store.set(CONFIG_KEY, config);
 
-  // One token cache for every account in this browser (IndexedDB, shared by the tabs); one active account
-  // per tab. The hooks tie this tab's one CAEP stream to its active account.
+  // One token cache for this tab (sessionStorage); one active account in the tab. The hooks tie this
+  // tab's one CAEP stream to its active account.
   accounts = new AccountManager(client, {
+    store: tabStorage ? new WebStorageTokenStore() : new MemoryTokenStore(),
     storeKey: `accounts:${metadata.issuer}:${config.clientId}`,
-    onActivate: (account, { getTokenSet }) => startCaep(account, getTokenSet),
+    onActivate: async (account, { getTokenSet }) => {
+      await rememberProfile(account, getTokenSet);
+      await startCaep(account, getTokenSet);
+    },
     onDeactivate: (account) => stopCaep(account.key),
     onLeave: (account, { getTokenSet }) => deleteStream(account, getTokenSet),
   });
@@ -182,7 +208,11 @@ async function go(make, what = 'sign-in') {
 }
 
 const acr = () => ({ acrValues: config.acrValues || undefined });
-const signIn = () => go((m) => m.signIn(acr()));
+// login: do not continue whoever is already signed in at the IdP. That skips
+// this request's sign-in screen, and on iya-sts the control for becoming
+// somebody else leaves for the user portal. consent: offline_access is
+// ignored unless the request asks for it (OIDC Core §11).
+const signIn = () => go((m) => m.signIn({ ...acr(), prompt: 'login consent' }));
 const addAccount = () => go((m) => m.addAccount(acr()));
 const chooseAccount = () => go((m) => m.chooseAccount(acr()));
 const resume = (key) => go((m) => m.resume(key, acr()), 'silent sign-in');
@@ -241,26 +271,11 @@ async function signOutAll() {
   else render();
 }
 
-async function forget(key) {
-  await accounts.forget(key);
-  ui.ended.delete(key);
-  render();
-}
-
-/** Before a new configuration: every account is signed out of this browser and forgotten. */
-async function resetAccounts() {
-  if (!accounts) return;
-  await accounts.signOutAll({ endSession: false }).catch(() => {});
-  for (const a of accounts.list()) await accounts.forget(a.key).catch(() => {});
-  perAccount.clear();
-  ui.ended.clear();
-}
-
 // ---------------------------------------------------------------------------
 // CAEP: this tab polls ONE stream, the active account's, authorised by its (DPoP-bound) access token.
-// A stream created with a person's token belongs to that person and carries events about them only, so
-// each account keeps its own stream at the transmitter; a dormant account's stream keeps queueing events,
-// and activating the account catches up on them before its tokens are used.
+// A stream belongs to the principal that created it. This public client does not create, change, or
+// delete streams: ssf.read can list, get, and poll, and ssf.manage is what writes. A dormant account's
+// stream keeps queueing events, and activating the account catches up on them before its tokens are used.
 // ---------------------------------------------------------------------------
 
 function subjectFor(a) {
@@ -276,6 +291,62 @@ function rememberStream(key, id) {
 }
 
 const transmitterIssuer = () => config.caep.transmitterIssuer || config.metadata.issuer;
+function jwtPayload(token) {
+  const part = String(token || '').split('.')[1];
+  if (!part) return {};
+  try {
+    const padded = part.replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(padded.padEnd(padded.length + (4 - padded.length % 4) % 4, '='))) || {};
+  } catch {
+    return {};
+  }
+}
+function firstText(...values) {
+  for (const value of values) {
+    const text = String(value ?? '').trim();
+    if (text) return text;
+  }
+  return '';
+}
+// The transmitter enforces the scope inside the access token, which may be narrower than oidc.json.
+function scopesOf(set) {
+  const fromToken = String(jwtPayload(set?.access_token).scope || '').split(/\s+/).filter(Boolean);
+  if (fromToken.length) return fromToken;
+  return String(set?.scope || '').split(/\s+/).filter(Boolean);
+}
+
+/** Reads the display name and username. Profile claims are at UserInfo, not in this flow's ID token. */
+async function rememberProfile(account, getTokenSet) {
+  let set;
+  try { set = await getTokenSet(); } catch { return; }
+  const access = jwtPayload(set?.access_token);
+  let info = {};
+  try {
+    info = await client.userinfo(set, { expectedSub: account.sub }) ?? {};
+  } catch { /* the access token's username still labels the account */ }
+  const name = firstText(info.name, info.nickname, account.name);
+  const username = firstText(info.preferred_username, access.username, account.preferred_username);
+  if (!name && !username) return;
+  const all = store.get(LABELS_KEY, sessionStorage) ?? {};
+  all[account.key] = { name, username };
+  store.set(LABELS_KEY, all, sessionStorage);
+}
+const canReadStream = (scopes) => scopes.includes('ssf.read') || scopes.includes('ssf.manage');
+const canWriteStream = (scopes) => scopes.includes('ssf.manage');
+// The verify button follows the configuration. The transmitter still refuses a write the token lacks.
+const streamWrite = () => String(config?.scope || '').split(/\s+/).includes('ssf.manage');
+
+/** List this account's streams and poll the first one. Does not create a stream. */
+async function adoptListed(account, getTokenSet) {
+  const probe = makeReceiver(account, getTokenSet);
+  await probe.discover();
+  const existing = await probe.listStreams();
+  const id = existing.find((s) => s?.stream_id)?.stream_id;
+  if (!id) return undefined;
+  const r = makeReceiver(account, getTokenSet, id);
+  await r.start({ catchUp: true });
+  return r;
+}
 
 function makeReceiver(account, getTokenSet, streamId) {
   const c = config.caep;
@@ -292,23 +363,57 @@ function makeReceiver(account, getTokenSet, streamId) {
   });
 }
 
-/** onActivate: start (or reuse) the account's stream and act on what it queued while dormant. */
+/** Quiet stream-card state: a note, not the red transmitter error. */
+function streamNote(key, status, note) {
+  if (caep.key !== key) return;
+  caep.state = { status, transmitter: transmitterIssuer(), note };
+}
+
+/** onActivate: read the account's stream and act on what it queued while dormant. */
 async function startCaep(account, getTokenSet) {
   if (!config?.caep?.enabled) return;
   const key = account.key;
   caep = { key, receiver: undefined, state: { status: 'connecting', transmitter: transmitterIssuer() } };
   render();
   try {
+    const scopes = scopesOf(await getTokenSet());
+    if (!canReadStream(scopes)) {
+      streamNote(key, 'unavailable', 'This sign-in was not issued ssf.read, so this tab is not reading a stream.');
+      render();
+      return;
+    }
+    const write = canWriteStream(scopes);
     const held = streamIds()[key];
-    let r = makeReceiver(account, getTokenSet, held);
-    try {
-      await r.start({ catchUp: true });
-    } catch (err) {
-      if (!held) throw err;
-      // The remembered stream is gone (deleted, or not ours any more): create a new one.
-      await r.stop();
+    let r;
+    if (held) {
+      r = makeReceiver(account, getTokenSet, held);
+      try {
+        await r.start({ catchUp: true });
+      } catch (err) {
+        await r.stop().catch(() => {});
+        if (!write) {
+          // The remembered stream is gone. Do not create a replacement.
+          r = await adoptListed(account, getTokenSet);
+          if (!r) {
+            streamNote(key, 'no-stream', 'No stream for this account. This client reads with ssf.read and does not create one.');
+            render();
+            return;
+          }
+        } else {
+          r = makeReceiver(account, getTokenSet);
+          await r.start({ catchUp: true });
+        }
+      }
+    } else if (write) {
       r = makeReceiver(account, getTokenSet);
       await r.start({ catchUp: true });
+    } else {
+      r = await adoptListed(account, getTokenSet);
+      if (!r) {
+        streamNote(key, 'no-stream', 'No stream for this account. This client reads with ssf.read and does not create one.');
+        render();
+        return;
+      }
     }
     if (caep.key !== key || accounts.get(key)?.status !== 'signed-in') {
       // A signal received while catching up ended the account, or another account was activated meanwhile.
@@ -317,11 +422,11 @@ async function startCaep(account, getTokenSet) {
     }
     caep.receiver = r;
     rememberStream(key, r.stream.stream_id);
-    if (config.caep.onlyUser && r.metadata.add_subject_endpoint) {
+    if (write && config.caep.onlyUser && r.metadata.add_subject_endpoint) {
       await r.addSubject(subjectFor(account)).catch((err) => log({ account: key, name: 'subject', action: `Could not add the subject: ${describe(err)}` }));
     }
     caep.state = { status: 'connected', transmitter: transmitterIssuer(), streamStatus: r.stream.status ?? 'enabled' };
-    r.requestVerification({ timeoutMs: 30_000 }).catch(() => {});
+    if (write) r.requestVerification({ timeoutMs: 30_000 }).catch(() => {});
   } catch (err) {
     // Shown on the stream card; the account is still activated so the person is not locked out by an
     // unreachable transmitter.
@@ -338,12 +443,15 @@ async function stopCaep(key) {
   if (r) await r.stop().catch(() => {});
 }
 
-/** onLeave: the account is signed out or ended; delete its stream while its tokens still work. */
+/** onLeave: the account is signed out or ended. Delete its stream only when the token can write. */
 async function deleteStream(account, getTokenSet) {
   await stopCaep(account.key);
   const id = streamIds()[account.key];
-  rememberStream(account.key, undefined);
   if (!id || !config?.caep?.enabled) return;
+  let scopes = [];
+  try { scopes = scopesOf(await getTokenSet()); } catch { return; }
+  if (!canWriteStream(scopes)) return;
+  rememberStream(account.key, undefined);
   const r = makeReceiver(account, getTokenSet, id);
   try {
     await r.discover();
@@ -468,18 +576,15 @@ async function render() {
   const configured = !!client;
   const me = signedIn();
   const list = accounts?.list() ?? [];
-  $('signed-out').hidden = !configured || !!me;
-  $('session-card').hidden = !me;
-  $('token-card').hidden = !me;
-  $('tokens-card').hidden = !me;
-  $('security-card').hidden = !configured;
-  $('accounts-card').hidden = !list.length;
   if (me) markSeen(me.key);
 
   renderWho(list);
   renderHero(list);
-  renderAccounts(list);
 
+  $('session-empty').hidden = !!me;
+  $('claims').hidden = !me;
+  $('btn-userinfo').disabled = !me;
+  $('btn-refresh').disabled = !me;
   if (me) {
     $('session-title').textContent = `Session · ${labelOf(me)}`;
     const claims = (await accounts.getTokenSet().catch(() => undefined))?.claims ?? me;
@@ -493,8 +598,17 @@ async function render() {
     pill.textContent = stepUp ? 'Step-up required' : 'Active';
     pill.className = `pill ${stepUp ? 'warn' : 'ok'}`;
     $('refresh-count').textContent = `${refreshCount} refreshes`;
+  } else {
+    $('session-title').textContent = 'Session';
+    $('claims').replaceChildren();
+    const pill = $('session-pill');
+    pill.textContent = 'Signed out';
+    pill.className = 'pill';
+    $('refresh-count').textContent = '';
   }
 
+  $('security-empty').hidden = configured;
+  $('security-list').hidden = !configured;
   if (configured) {
     const f = client.securityFeatures;
     const items = [
@@ -504,19 +618,18 @@ async function render() {
       ['nonce', 'random, checked against the ID token'],
       ['Issuer identification', f.issuerIdentification],
       ['Pushed Authorization Requests', f.par ? 'on: the request never passes through the browser URL' : 'off'],
-      ['DPoP', f.dpop ? `on (${f.dpop.alg}, non-extractable key, jkt ${f.dpop.jkt.slice(0, 12)}…)` : 'off: bearer tokens'],
+      ['DPoP', f.dpop ? `on (${f.dpop.alg}, this tab's session storage, jkt ${f.dpop.jkt.slice(0, 12)}…)` : 'off: bearer tokens'],
       ['ID token', f.idToken],
       ['TLS', f.tlsEnforced ? 'required for the IdP and redirect URIs (loopback excepted)' : 'not enforced'],
-      ['Token cache', 'every signed-in account\'s tokens, in IndexedDB, shared by this browser\'s tabs'],
+      ['Token cache', 'this tab\'s tokens, in session storage, cleared when the tab closes'],
       ['One active account per tab', 'only its tokens are reachable, refreshed and used to poll; the others stay dormant until activated, and their queued signals are acted on first'],
-      ['Several accounts', 'a sign-in naming an account refuses anybody else; sign-out names the account\'s ID token so only its IdP session ends; refreshes are locked across tabs'],
+      ['Several accounts', 'a sign-in naming an account refuses anybody else; sign-out names the account\'s ID token so only its IdP session ends'],
       ['Resource indicators', f.resourceIndicators ? f.resourceIndicators.join(', ') : 'none'],
       ['Page', 'CSP (no inline script), Referrer-Policy no-referrer, framing denied'],
     ];
     $('security-list').replaceChildren(...items.map(([k, v]) => el('li', {}, el('strong', {}, k), el('span', { class: 'muted' }, ` ${v}`))));
   }
 
-  renderConfig();
   renderStream();
   renderBanners();
   renderLog();
@@ -549,7 +662,7 @@ function renderWho(list) {
   const wasOpen = document.querySelector('.acct-menu')?.open;
   const row = (a) => el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => activate(a.key) },
     avatar(a),
-    el('span', { class: 'menu-who' }, el('span', {}, labelOf(a)), el('span', { class: 'muted small' }, a.email ?? a.sub)),
+    el('span', { class: 'menu-who' }, el('span', {}, labelOf(a)), a.email ? el('span', { class: 'muted small' }, a.email) : ''),
     a.status === 'signed-in' ? '' : el('span', { class: `pill ${STATUS[a.status][0]}` }, STATUS[a.status][1]),
     badge(a.key));
   const menu = el('details', { class: 'acct-menu' },
@@ -575,9 +688,15 @@ function renderWho(list) {
 function renderHero(list) {
   const cur = accounts?.active;
   const actions = [];
-  let title = 'Continuous access, in real time.';
-  let text = 'Sign in through your identity provider. This page keeps your tokens, refreshes them before they expire, and listens for CAEP events that can change or end your session while you\'re using it. You can sign in with several accounts and switch between them.';
-  if (cur && cur.status === 'tokens-missing') {
+  let title = 'Sign in';
+  let text = 'Sign in through your identity provider. This tab keeps the session and the tokens. CAEP events are on the other tab.';
+  if (!client) {
+    title = 'Identity provider';
+    text = 'Loading the OIDC configuration.';
+  } else if (cur?.status === 'signed-in') {
+    title = `Signed in as ${labelOf(cur)}`;
+    text = 'The session, token cache, and tokens for this account are on this tab.';
+  } else if (cur && cur.status === 'tokens-missing') {
     title = `Continue as ${labelOf(cur)}`;
     text = 'The tokens cached for this account have expired and cannot be refreshed. New ones can be fetched without a password while its session at the identity provider lasts.';
     actions.push(el('button', { class: 'btn primary', onclick: () => resume(cur.key) }, `Continue as ${labelOf(cur)}`));
@@ -587,41 +706,15 @@ function renderHero(list) {
     actions.push(el('button', { class: 'btn primary', onclick: () => reauthenticate(cur.key) }, `Sign in again as ${labelOf(cur)}`));
   } else if (list.some((a) => a.status === 'signed-in')) {
     title = 'Choose an account for this tab';
-    text = 'These accounts are signed in in this browser. Each tab uses one of them at a time: pick one in the Accounts card. No password is needed.';
+    text = 'These accounts are signed in in this tab. Pick one from the menu under your name. No password is needed.';
   } else if (list.length) {
     title = 'Choose an account';
-    text = 'None of the accounts in this browser is signed in. Sign in again as one of them in the Accounts card, or sign in with another account.';
+    text = 'None of the accounts in this tab is signed in. Sign in again as one of them from the menu, or sign in with another account.';
   }
-  actions.push(el('button', { class: `btn ${actions.length ? 'ghost' : 'primary'}`, onclick: () => (list.length ? addAccount() : signIn()) }, list.length ? 'Sign in with another account' : 'Sign in'));
+  if (client) actions.push(el('button', { class: `btn ${actions.length ? 'ghost' : 'primary'}`, onclick: () => (list.length ? addAccount() : signIn()) }, list.length ? 'Sign in with another account' : 'Sign in'));
   $('hero-title').textContent = title;
   $('hero-text').textContent = text;
   $('hero-actions').replaceChildren(...actions);
-}
-
-/** The Accounts card: every account in this browser, its status, and what can be done with it. */
-function renderAccounts(list) {
-  const cur = accounts?.activeKey;
-  $('accounts-count').textContent = `${list.filter((a) => a.status === 'signed-in').length} of ${list.length} signed in`;
-  $('accounts-list').replaceChildren(...list.map((a) => {
-    const [tone, label] = STATUS[a.status];
-    const role = a.status !== 'signed-in' ? '' : a.key === cur ? `active in this tab${config.caep.enabled ? ` · stream ${caep.state.status === 'connected' ? caep.state.streamStatus ?? 'enabled' : caep.state.status}` : ''}` : 'dormant: tokens cached, not refreshed or polled';
-    const btn = (text, onclick, cls = 'ghost') => el('button', { class: `btn small-btn ${cls}`, type: 'button', onclick: (e) => withBusy(e.currentTarget, onclick) }, text);
-    const actions = [
-      a.key !== cur && btn('Switch', () => activate(a.key), a.status === 'signed-in' ? '' : 'ghost'),
-      a.status === 'tokens-missing' && btn('Continue', () => resume(a.key)),
-      (a.status === 'ended' || a.status === 'signed-out') && btn('Sign in again', () => reauthenticate(a.key)),
-      (a.status === 'signed-in' || a.status === 'tokens-missing') && btn('Sign out', () => signOut(a.key)),
-      a.status !== 'signed-in' && btn('Forget', () => forget(a.key)),
-    ].filter(Boolean);
-    return el('li', { class: `acct${a.key === cur ? ' current' : ''}` },
-      avatar(a),
-      el('div', { class: 'acct-body' },
-        el('div', { class: 'acct-name' }, labelOf(a), a.key === cur ? el('span', { class: 'pill ok' }, 'active') : '', badge(a.key)),
-        el('div', { class: 'muted small' }, [a.email ?? a.sub, a.sid && `sid ${a.sid}`, role].filter(Boolean).join(' · ')),
-        a.endedReason && a.status === 'ended' ? el('div', { class: 'small acct-why' }, a.endedReason) : ''),
-      el('div', { class: 'acct-side' }, el('span', { class: `pill ${tone}` }, label), el('div', { class: 'acct-actions' }, ...actions)));
-  }));
-  $('accounts-hint').textContent = 'Every signed-in account\'s tokens are cached in this browser and shared by its tabs. Each tab has one active account: only its tokens are used and refreshed, and only its stream is polled. Switching activates another account; signals queued for it while it was dormant are acted on first.';
 }
 
 function renderStream() {
@@ -640,11 +733,13 @@ function renderStream() {
     ['transmitter', transmitter ?? '—'],
     ...(s ? [['stream_id', s.stream_id], ['delivery', 'poll (RFC 8936)'], ['SET audience', [].concat(s.aud ?? '—').join(', ')]] : []),
     ...(r?.metadata?.default_subjects ? [['default_subjects', r.metadata.default_subjects]] : []),
-    ...(ssfState.status === 'waiting-for-user' ? [['note', 'Sign in: the active account\'s stream is created with its own access token.']] : []),
+    ...(ssfState.status === 'waiting-for-user' ? [['note', 'Sign in. This tab reads the active account\'s stream when its access token carries ssf.read.']] : []),
+    ...(ssfState.note ? [['note', ssfState.note]] : []),
     ...((accounts?.list().length ?? 0) > 1 ? [['other accounts', 'dormant: their streams keep queueing at the transmitter, and are caught up when the account is activated']] : []),
   ].flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
   $('ssf-events').replaceChildren(...(s?.events_delivered ?? []).map((e) => el('span', { class: 'chip', title: e }, e.split('/').pop())));
-  $('btn-verify').disabled = !s;
+  $('btn-verify').disabled = !s || !streamWrite();
+  $('btn-verify').title = streamWrite() ? '' : 'Needs the ssf.manage scope';
   $('btn-reconnect').disabled = !me || !config?.caep?.enabled;
   $('ssf-error').hidden = !ssfState.error;
   $('ssf-error').textContent = ssfState.error ?? '';
@@ -687,7 +782,14 @@ function renderBanners() {
 async function tick() {
   const me = signedIn();
   const t = me && await accounts.getTokenSet().catch(() => undefined);
-  if (!t?.expires_at) return;
+  if (!t?.expires_at) {
+    $('expires-in').textContent = '—';
+    $('refresh-in').textContent = '—';
+    $('last-refresh').textContent = '—';
+    $('meter-fill').style.width = '0%';
+    $('meter-skew').style.width = '0%';
+    return;
+  }
   const now = Date.now() / 1000;
   const lifetime = Math.max(1, t.expires_at - (t.issued_at ?? now));
   const left = Math.max(0, t.expires_at - now);
@@ -720,6 +822,7 @@ function renderLog(freshAt) {
   }
   const multi = (accounts?.list().length ?? 0) > 1 || entries.some((e) => e.account && e.account !== cur);
   $('log').replaceChildren(...shown.map((entry) => logEntry(entry, entry.at === freshAt, all && multi)));
+  $('btn-clear-log').disabled = shown.length === 0;
   $('log-empty').hidden = shown.length > 0;
   $('log-empty').textContent = entries.length && !all
     ? `No signals for ${labelOf(accounts.active)} yet. Switch to "All accounts" to see the others'.`
@@ -751,6 +854,13 @@ for (const b of document.querySelectorAll('.log-seg')) {
     renderLog();
   });
 }
+$('btn-clear-log').addEventListener('click', () => {
+  const cur = accounts?.activeKey;
+  const all = logView === 'all' || !cur;
+  const kept = all ? [] : eventLog().filter((e) => e.account !== cur);
+  store.set(LOG_KEY, kept);
+  render();
+});
 // Signals received by the other tabs.
 window.addEventListener('storage', (e) => {
   if (e.key === LOG_KEY) render();
@@ -771,7 +881,11 @@ function tokenView(value) {
 
 async function renderTokens() {
   const me = signedIn();
-  if (!me) return;
+  if (!me) {
+    $('tokens-note').textContent = 'No tokens until someone is signed in on this tab.';
+    $('tokens-body').replaceChildren();
+    return;
+  }
   const { refreshCount } = stateOf(me.key);
   const set = tokenTab === 'signIn'
     ? (signInTokens?.key === me.key ? signInTokens.tokenSet : undefined)
@@ -840,303 +954,78 @@ async function copy(text, button) {
 }
 
 // ---------------------------------------------------------------------------
-// Configuration form
+// OIDC configuration file
 // ---------------------------------------------------------------------------
 
-let editing = false;
-let formFilled = false;
-let autoSsfIssuer = '';
-
-function renderConfig() {
-  const showForm = !client || editing;
-  $('config-form').hidden = !showForm;
-  $('config-summary').hidden = showForm;
-  $('btn-cancel').hidden = !client;
-  const pill = $('config-pill');
-  pill.textContent = client ? 'Configured' : 'Not configured';
-  pill.className = `pill ${client ? 'ok' : 'warn'}`;
-  if (client) {
-    $('config-summary-kv').replaceChildren(...[
-      ['issuer', config.metadata.issuer],
-      ['client_id', `${config.clientId}${config.registeredAt ? ' (registered dynamically)' : ''}`],
-      ['client auth', 'none (public client)'],
-      ['ID token alg', client.config.idTokenSignedResponseAlg],
-      ['scope', client.config.scope],
-      ['CAEP', config.caep.enabled ? `poll · ${config.caep.transmitterIssuer || `${config.metadata.issuer} (OIDC issuer)`}` : 'disabled'],
-    ].flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v ?? '—')]));
-  }
-  $('register-urls').replaceChildren(...[['redirect_uri', URLS.redirectUri], ['post_logout_redirect_uri', URLS.postLogoutRedirectUri]]
-    .flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, el('span', {}, v), el('button', { class: 'copy', type: 'button', onclick: (e) => copy(v, e.currentTarget) }, 'Copy'))]));
-  if (showForm && !formFilled) fillForm();
+function parseOidcFile(doc) {
+  if (!doc || typeof doc !== 'object') throw new Error('The configuration file is not a JSON object.');
+  const metadataUrl = String(doc.metadataUrl ?? '').trim();
+  const clientId = String(doc.client_id ?? doc.clientId ?? '').trim();
+  const scopes = Array.isArray(doc.scopes)
+    ? doc.scopes.map((s) => String(s).trim()).filter(Boolean).join(' ')
+    : String(doc.scopes ?? '').trim();
+  if (!metadataUrl) throw new Error('The configuration file needs metadataUrl.');
+  if (!clientId) throw new Error('The configuration file needs client_id.');
+  if (!scopes) throw new Error('The configuration file needs scopes.');
+  const url = new URL(metadataUrl.includes('/.well-known/') ? metadataUrl : oidcDiscoveryUrl(metadataUrl.replace(/\/+$/, '')));
+  return { metadataUrl: url.href, clientId, scopes };
 }
 
-function fillForm() {
-  formFilled = true;
-  const cur = client ? config : undefined;
-  $('metadata').value = cur ? JSON.stringify(cur.metadata, null, 2) : '';
-  $('client-id').value = cur?.clientId ?? '';
-  $('scope').value = cur?.scope ?? '';
-  $('resource').value = cur?.resource ?? '';
-  $('acr-values').value = cur?.acrValues ?? '';
-  $('use-dpop').checked = cur ? !!cur.dpop : true;
-  $('par-mode').value = cur?.par ?? 'auto';
-  $('caep-enabled').checked = cur ? cur.caep.enabled : true;
-  $('ssf-issuer').value = cur?.caep.transmitterIssuer || cur?.metadata.issuer || '';
-  autoSsfIssuer = cur && !cur.caep.transmitterIssuer ? cur.metadata.issuer : '';
-  $('ssf-max-age').value = cur?.caep.maxSetAgeSec ?? 3600;
-  $('ssf-subject').value = cur?.caep.subjectFormat ?? 'iss_sub';
-  $('ssf-only-users').checked = cur ? cur.caep.onlyUser !== false : true;
-  const selected = new Set(cur?.caep.events ?? DEFAULT_CAEP_EVENTS);
-  $('ssf-events-pick').replaceChildren(...CAEP_EVENT_NAMES.map((name) => el('label', { class: 'check small' },
-    Object.assign(el('input', { type: 'checkbox', value: name }), { checked: selected.has(name) }), name)));
-  document.querySelector('input[name="reg-mode"][value="static"]').checked = true;
-  $('client-name').value = '';
-  $('initial-token').value = '';
-  $('software-statement').value = '';
-  $('config-error').hidden = true;
-  summarizeMetadata();
-  populateAlgs(cur?.idTokenAlg ?? '');
-  if (!cur && restoreForm()) {
-    summarizeMetadata();
-    restoreForm();
-  }
-  updateFieldsets();
-  updateMode();
+async function fetchProviderMetadata(metadataUrl) {
+  const res = await fetch(metadataUrl, { headers: { accept: 'application/json' } });
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${metadataUrl}`);
+  const metadata = await res.json();
+  validateOpenIdProviderMetadata(metadata);
+  return metadata;
 }
 
-function parsedMetadata() {
-  try { return JSON.parse($('metadata').value); } catch { return undefined; }
-}
-
-function populateAlgs(selected = $('id-token-alg').value) {
-  const advertised = [].concat(parsedMetadata()?.id_token_signing_alg_values_supported ?? []);
-  const usable = advertised.filter((a) => SUPPORTED_ID_TOKEN_ALGS.includes(a));
-  const skipped = advertised.filter((a) => a !== 'none' && !SUPPORTED_ID_TOKEN_ALGS.includes(a));
-  $('id-token-alg').replaceChildren(
-    el('option', { value: '' }, `Automatic (${usable.includes('RS256') ? 'RS256' : usable[0] ?? 'RS256'})`),
-    ...usable.map((a) => el('option', { value: a }, a)),
-  );
-  $('id-token-alg').value = usable.includes(selected) ? selected : '';
-  $('id-token-alg').title = skipped.length ? `Not verifiable by this library: ${skipped.join(', ')}` : '';
-}
-
-function summarizeMetadata() {
-  const out = $('metadata-summary');
-  const text = $('metadata').value.trim();
-  out.className = 'hint';
-  if (!text) {
-    out.textContent = '';
-    updateMode();
-    return;
-  }
-  const m = parsedMetadata();
-  if (!m) {
-    out.textContent = 'Not valid JSON.';
-    out.classList.add('bad');
-    updateMode();
-    return;
-  }
-  try {
-    validateOpenIdProviderMetadata(m);
-  } catch (err) {
-    out.textContent = err.message;
-    out.classList.add('bad');
-    updateMode();
-    return;
-  }
-  const facts = [
-    `Issuer ${m.issuer}`,
-    m.pushed_authorization_request_endpoint ? 'PAR' : null,
-    m.dpop_signing_alg_values_supported ? 'DPoP' : null,
-    m.authorization_response_iss_parameter_supported ? 'RFC 9207 iss' : null,
-    Array.isArray(m.token_endpoint_auth_methods_supported) && !m.token_endpoint_auth_methods_supported.includes('none') ? '⚠ public clients not accepted' : null,
-  ].filter(Boolean);
-  out.textContent = facts.join(' · ');
-  out.classList.add(facts.some((f) => f.startsWith('⚠')) ? 'bad' : 'ok');
-  const ssfIssuer = $('ssf-issuer');
-  if (!ssfIssuer.value.trim() || ssfIssuer.value.trim() === autoSsfIssuer) {
-    ssfIssuer.value = m.issuer;
-    autoSsfIssuer = m.issuer;
-  }
-  $('ssf-issuer-hint').textContent = ssfIssuer.value.trim() === m.issuer ? 'Same as the OIDC issuer.' : `Differs from the OIDC issuer (${m.issuer}).`;
-  const ssfScopes = [].concat(m.scopes_supported ?? []).filter((sc) => /^ssf[:._-]/i.test(sc));
-  if (!$('scope').value && ssfScopes.length) {
-    const base = ['openid', 'profile', 'email', ...([].concat(m.scopes_supported ?? []).includes('offline_access') ? ['offline_access'] : [])];
-    $('scope').value = [...base, ...ssfScopes].join(' ');
-  }
-  populateAlgs();
-  updateMode();
-}
-
-const regMode = () => document.querySelector('input[name="reg-mode"]:checked').value;
-
-function updateMode() {
-  const m = parsedMetadata();
-  const canRegister = !!m?.registration_endpoint;
-  const dcr = document.querySelector('input[name="reg-mode"][value="dynamic"]');
-  dcr.disabled = !canRegister;
-  if (!canRegister && dcr.checked) document.querySelector('input[name="reg-mode"][value="static"]').checked = true;
-  $('dcr-note').textContent = canRegister ? 'OpenID Connect Dynamic Client Registration (public client)' : m ? 'This IdP has no registration_endpoint' : 'Load the metadata first';
-  const dynamic = regMode() === 'dynamic';
-  $('static-fields').hidden = dynamic;
-  $('dynamic-fields').hidden = !dynamic;
-  $('alg-hint').textContent = dynamic
-    ? 'Registered as id_token_signed_response_alg; the registration is refused if the IdP assigns another.'
-    : 'Must match the algorithm your client is registered with.';
-  $('btn-save').textContent = dynamic ? 'Register client & connect' : 'Save & connect';
-}
-
-function updateFieldsets() {
-  document.querySelector('.caep').classList.toggle('off', !$('caep-enabled').checked);
-  $('storage-hint').textContent = $('use-dpop').checked
-    ? 'Every signed-in account\'s tokens are cached in IndexedDB, shared by this browser\'s tabs. Script in this page can read them, but they are DPoP-bound: useless without the non-extractable key.'
-    : '⚠ Every signed-in account\'s tokens are cached in IndexedDB as bearer tokens: any script injected into this page could read and replay them. Turn DPoP on.';
-}
-
-async function fetchMetadata() {
-  const out = $('fetch-result');
-  out.className = 'hint';
-  out.textContent = 'Fetching…';
-  try {
-    const input = $('discovery-url').value.trim();
-    const url = new URL(input.includes('/.well-known/') ? input : oidcDiscoveryUrl(input.replace(/\/+$/, '')));
-    const res = await fetch(url, { headers: { accept: 'application/json' } });
-    if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
-    const metadata = await res.json();
-    validateOpenIdProviderMetadata(metadata);
-    $('metadata').value = JSON.stringify(metadata, null, 2);
-    summarizeMetadata();
-    let ssf;
-    try {
-      ssf = await discoverSSFTransmitter(metadata.issuer);
-    } catch {
-      ssf = undefined;
-    }
-    out.textContent = ssf
-      ? `Loaded ${url.href}. SSF transmitter found${ssf.default_subjects ? ` (default_subjects ${ssf.default_subjects})` : ''}.`
-      : `Loaded ${url.href}. No SSF metadata at this issuer; set the transmitter issuer below, or turn off CAEP.`;
-    out.classList.add(ssf ? 'ok' : 'bad');
-    saveForm();
-  } catch (err) {
-    out.textContent = describe(err);
-    out.classList.add('bad');
-  }
-}
-
-async function saveConfig(e) {
-  e.preventDefault();
-  const err = $('config-error');
-  err.hidden = true;
-  const metadata = parsedMetadata();
-  try {
-    if (!metadata) throw new Error('The metadata document is not valid JSON.');
-    const cfg = {
+/** Connects the in-browser client from an OIDC configuration file. */
+async function connectFromFile(doc) {
+  const parsed = parseOidcFile(doc);
+  const metadata = await fetchProviderMetadata(parsed.metadataUrl);
+  const same = client
+    && config?.metadataUrl === parsed.metadataUrl
+    && config?.clientId === parsed.clientId
+    && config?.scope === parsed.scopes;
+  if (!same) {
+    await applyConfig({
       metadata,
-      clientId: $('client-id').value.trim(),
-      idTokenAlg: $('id-token-alg').value,
-      scope: $('scope').value.trim(),
-      resource: $('resource').value.trim(),
-      acrValues: $('acr-values').value.trim(),
-      dpop: $('use-dpop').checked,
-      par: $('par-mode').value,
-      caep: {
-        enabled: $('caep-enabled').checked,
-        transmitterIssuer: $('ssf-issuer').value.trim() === metadata.issuer ? '' : $('ssf-issuer').value.trim(),
-        maxSetAgeSec: Math.max(0, Number($('ssf-max-age').value) || 0),
-        subjectFormat: $('ssf-subject').value,
-        onlyUser: $('ssf-only-users').checked,
-        events: [...document.querySelectorAll('#ssf-events-pick input:checked')].map((i) => i.value),
-      },
-    };
-    if (cfg.caep.enabled && !cfg.caep.events.length) throw new Error('Select at least one CAEP event.');
-    let register;
-    if (regMode() === 'dynamic') {
-      const request = {
-        application_type: 'web',
-        client_name: $('client-name').value.trim() || 'oidc-caep-client demo',
-        redirect_uris: [URLS.redirectUri],
-        post_logout_redirect_uris: [URLS.postLogoutRedirectUri],
-        response_types: ['code'],
-        grant_types: ['authorization_code', 'refresh_token'].filter((g) => (metadata.grant_types_supported ?? ['authorization_code']).includes(g)),
-        id_token_signed_response_alg: cfg.idTokenAlg || pickIdTokenAlg(metadata),
-        scope: cfg.scope || undefined,
-      };
-      const statement = $('software-statement').value.trim();
-      if (statement) request.software_statement = statement;
-      register = { request, initialAccessToken: $('initial-token').value.trim() || undefined };
-    }
-    // Reconfiguring signs every account out here.
-    await resetAccounts();
-    await applyConfig(cfg, { register });
-    editing = false;
-    formFilled = false;
-    await render();
-  } catch (e2) {
-    err.textContent = describe(e2);
-    err.hidden = false;
+      metadataUrl: parsed.metadataUrl,
+      clientId: parsed.clientId,
+      scope: parsed.scopes,
+      ...CLIENT_DEFAULTS,
+      caep: { ...CLIENT_DEFAULTS.caep },
+    });
   }
 }
 
-// Remembered (unsaved) form values. The DCR initial access token is never stored.
-function formFields() {
-  return [...$('config-form').querySelectorAll('input, select, textarea')].filter((f) => f.type !== 'password' && !NOT_STORED.has(f.id));
+function showPageTab(which) {
+  const name = which === 'caep' ? 'caep' : 'identity';
+  store.set(PAGE_TAB_KEY, name, sessionStorage);
+  for (const id of ['identity', 'caep']) {
+    const on = id === name;
+    $(`panel-${id}`).hidden = !on;
+    const tab = $(`tab-${id}`);
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+  }
 }
 
-function saveForm() {
-  const values = {};
-  for (const f of formFields()) {
-    if (f.type === 'radio') {
-      if (f.checked) values[`radio:${f.name}`] = f.value;
-    } else if (f.type === 'checkbox') {
-      if (f.id) values[f.id] = f.checked;
-    } else if (f.id) {
-      values[f.id] = f.value;
-    }
-  }
-  values.events = [...document.querySelectorAll('#ssf-events-pick input:checked')].map((i) => i.value);
-  store.set(FORM_STORE_KEY, values);
+for (const tab of document.querySelectorAll('.page-tab')) {
+  tab.addEventListener('click', () => showPageTab(tab.dataset.page));
 }
-
-function restoreForm() {
-  const values = store.get(FORM_STORE_KEY);
-  if (!values || typeof values !== 'object') return false;
-  for (const f of formFields()) {
-    if (f.type === 'radio') {
-      const want = values[`radio:${f.name}`];
-      if (want !== undefined) f.checked = f.value === want && !f.disabled;
-    } else if (f.type === 'checkbox') {
-      if (f.id && typeof values[f.id] === 'boolean') f.checked = values[f.id];
-    } else if (f.id && typeof values[f.id] === 'string') {
-      if (f.tagName === 'SELECT' && ![...f.options].some((o) => o.value === values[f.id])) continue;
-      f.value = values[f.id];
-    }
-  }
-  if (Array.isArray(values.events)) {
-    for (const box of document.querySelectorAll('#ssf-events-pick input')) box.checked = values.events.includes(box.value);
-  }
-  const issuer = parsedMetadata()?.issuer;
-  if (issuer && $('ssf-issuer').value.trim() === issuer) autoSsfIssuer = issuer;
-  return true;
-}
-
-$('config-form').addEventListener('submit', (e) => withBusy($('btn-save'), () => saveConfig(e)));
-$('config-form').addEventListener('input', saveForm);
-$('config-form').addEventListener('change', saveForm);
-$('btn-fetch').addEventListener('click', (e) => withBusy(e.currentTarget, fetchMetadata));
-$('discovery-url').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    $('btn-fetch').click();
-  }
+document.querySelector('.page-tabs').addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  const tabs = [...document.querySelectorAll('.page-tab')];
+  const i = tabs.indexOf(document.activeElement);
+  if (i < 0) return;
+  e.preventDefault();
+  const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+  next.focus();
+  showPageTab(next.dataset.page);
 });
-$('metadata').addEventListener('input', summarizeMetadata);
-for (const id of ['caep-enabled', 'use-dpop']) $(id).addEventListener('change', updateFieldsets);
-for (const r of document.querySelectorAll('input[name="reg-mode"]')) r.addEventListener('change', updateMode);
-$('btn-edit-config').addEventListener('click', () => { editing = true; formFilled = false; renderConfig(); });
-$('btn-cancel').addEventListener('click', () => { editing = false; formFilled = false; renderConfig(); });
+showPageTab(store.get(PAGE_TAB_KEY, sessionStorage) === 'caep' ? 'caep' : 'identity');
 
-$('btn-add-account').addEventListener('click', () => addAccount());
-$('btn-choose-account').addEventListener('click', () => chooseAccount());
 document.addEventListener('click', (e) => {
   const menu = document.querySelector('.acct-menu');
   if (menu?.open && !menu.contains(e.target)) menu.open = false;
@@ -1175,7 +1064,9 @@ $('btn-verify').addEventListener('click', (e) => withBusy(e.currentTarget, async
 $('btn-reconnect').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
   const me = signedIn();
   const tokens = (opts) => accounts.getTokenSet(opts);
-  await deleteStream(me, tokens);
+  const scopes = scopesOf(await tokens().catch(() => ({})));
+  if (canWriteStream(scopes)) await deleteStream(me, tokens);
+  else await stopCaep(me.key);
   await startCaep(me, tokens);
 }));
 
@@ -1184,15 +1075,14 @@ $('btn-reconnect').addEventListener('click', (e) => withBusy(e.currentTarget, as
 // ---------------------------------------------------------------------------
 
 async function start() {
-  const saved = store.get(CONFIG_KEY);
-  if (saved?.metadata && saved.clientId) {
-    try {
-      await applyConfig(saved);
-    } catch (err) {
-      ui.error = `Saved configuration could not be applied: ${describe(err)}`;
-      client = undefined;
-      accounts = undefined;
-    }
+  try {
+    const res = await fetch('/oidc.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status} reading /oidc.json`);
+    await connectFromFile(await res.json());
+  } catch (err) {
+    ui.error = `OIDC configuration could not be applied: ${describe(err)}`;
+    client = undefined;
+    accounts = undefined;
   }
   if (client) {
     const params = new URLSearchParams(location.search);
