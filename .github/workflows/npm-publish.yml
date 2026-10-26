@@ -3,18 +3,24 @@
 #
 # Builds, tests and publishes packages/oidc-caep-client to npmjs.com.
 #
-# THE VERSION is iya-sts's scheme (scripts/version.mjs): M.N from the VERSION
-# file and a build number that is the UTC build instant, YYYYMMDDHHMMSS, so
-# every publish gets a new, increasing version (0.1.20261026170512) with no
-# version commit. The committed package.json says M.N.0; `--set` writes the
-# real number into the workspace copy just before packing.
+# THE VERSION (scripts/version.mjs): M.N from the VERSION file, and a patch
+# number worked out from what is already on npm, so nobody edits a number per
+# build and no version commit is needed:
+#   - main publishes a release, M.N.P: one more than the highest M.N release
+#     published (0.2.0, 0.2.1, ...);
+#   - develop publishes a pre-release of the release that comes next,
+#     M.N.P-next.R (0.2.1-next.0, 0.2.1-next.1, ...). npm never resolves a
+#     range like ^0.2.0 to a pre-release.
+# The committed package.json says M.N.0; `--set` writes the real version into
+# the workspace copy just before packing.
 #
 # WHEN IT PUBLISHES, as iya-sts's build-container.yml does for images:
-#   - a push to main publishes under the npm dist-tag `latest`;
-#   - a push to develop publishes under `next`, so `npm install` never picks it
-#     up by accident;
+#   - a push to main publishes a release under the npm dist-tag `latest`;
+#   - a push to develop publishes a pre-release under `next`, so `npm install`
+#     never picks it up by accident;
 #   - a pull request builds, tests and packs, and publishes nothing;
-#   - Run workflow (workflow_dispatch) publishes under the dist-tag chosen.
+#   - Run workflow (workflow_dispatch) publishes on the channel chosen: latest
+#     (a release) or next (a pre-release).
 # Only a change to the package, VERSION, the versioner, the lock file or this
 # workflow publishes. A demo-only change doesn't release the library.
 #
@@ -71,6 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.stamp.outputs.version }}
+      channel: ${{ steps.channel.outputs.channel }}
       tarball: ${{ steps.pack.outputs.tarball }}
     steps:
       - name: Check out
@@ -93,12 +100,24 @@ jobs:
       - name: Check the manifests follow VERSION
         run: node scripts/version.mjs --check-manifests
 
+      # main releases M.N.P; develop (and a pull request's dry run) a pre-release, M.N.P-next.R.
+      # The numbers come from the versions already on npm (scripts/version.mjs).
+      - name: Choose the channel
+        id: channel
+        run: |
+          case "${GITHUB_EVENT_NAME}:${GITHUB_REF_NAME}" in
+            workflow_dispatch:*) CHANNEL="${{ inputs.dist-tag }}" ;;
+            push:main)           CHANNEL=latest ;;
+            *)                   CHANNEL=next ;;
+          esac
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+
       - name: Stamp the version
         id: stamp
         run: |
-          VERSION="$(node scripts/version.mjs --set packages/oidc-caep-client)"
+          VERSION="$(node scripts/version.mjs --set packages/oidc-caep-client --channel '${{ steps.channel.outputs.channel }}')"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "### oidc-caep-client ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### oidc-caep-client ${VERSION} (${{ steps.channel.outputs.channel }})" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Pack
         id: pack
@@ -154,15 +173,10 @@ jobs:
         with:
           name: npm-package
 
+      # The channel the build stamped the version for: a release goes out as latest, a pre-release as next.
       - name: Choose the dist-tag
         id: tag
-        run: |
-          case "${GITHUB_EVENT_NAME}:${GITHUB_REF_NAME}" in
-            workflow_dispatch:*) TAG="${{ inputs.dist-tag }}" ;;
-            push:main)           TAG=latest ;;
-            *)                   TAG=next ;;
-          esac
-          echo "dist_tag=${TAG}" >> "$GITHUB_OUTPUT"
+        run: echo "dist_tag=${{ needs.build.outputs.channel }}" >> "$GITHUB_OUTPUT"
 
       - name: Publish
         env:
