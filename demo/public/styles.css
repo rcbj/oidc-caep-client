@@ -234,10 +234,13 @@ label.check { display: inline-flex; align-items: center; gap: 8px; font-weight: 
 .acct-menu > summary { list-style: none; display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border: 1px solid var(--border); border-radius: 999px; }
 .acct-menu > summary::-webkit-details-marker { display: none; }
 .acct-menu > summary:hover, .acct-menu[open] > summary { border-color: var(--accent); }
-.menu-name { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Labels arrive cut to 64 characters (menuLabel() in app.js); the ellipsis here only acts on narrow screens. */
+.menu-name { max-width: min(64ch, calc(100vw - 120px)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .caret { color: var(--muted); font-size: 12px; }
 .menu {
-  position: absolute; right: 0; top: calc(100% + 8px); width: min(340px, calc(100vw - 32px)); z-index: 10;
+  /* As wide as its longest row (a 64-character label), never narrower than 340px or wider than the screen. */
+  position: absolute; right: 0; top: calc(100% + 8px); width: max-content; min-width: min(340px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px); z-index: 10;
   background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 6px;
   box-shadow: 0 12px 32px rgb(0 0 0 / .18);
 }
@@ -249,7 +252,8 @@ label.check { display: inline-flex; align-items: center; gap: 8px; font-weight: 
 .menu-row:hover, .menu-row:focus-visible { background: var(--accent-soft); outline: none; }
 .menu-who { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .menu-who > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.menu-note { margin: 4px 10px 6px; }
+/* Wraps at the menu's width without setting it: only the rows (the labels) decide how wide the menu is. */
+.menu-note { margin: 4px 10px 6px; inline-size: 0; min-inline-size: calc(100% - 20px); }
 .menu-sep { height: 1px; background: var(--border); margin: 6px 4px; }
 .avatar { flex: none; }
 .avatar.plus { background: var(--bg); color: var(--muted); border: 1px dashed var(--border); }
