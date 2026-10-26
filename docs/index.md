@@ -24,14 +24,14 @@ That adds the package to your `package.json`:
 ```json
 {
   "dependencies": {
-    "oidc-caep-client": "^0.1.0"
+    "oidc-caep-client": "^0.2.0"
   }
 }
 ```
 
 It works from JavaScript and TypeScript: the package ships type declarations, so `import { SSFReceiver, type SecurityEvent } from 'oidc-caep-client'` is typed with no extra setup.
 
-Versions are `M.N.O`, with `O` the UTC build time, so `^0.1.0` takes every later 0.1 build; `npm install oidc-caep-client@next` gets the one built from `develop`. [Installing](reference.md#installing) in the reference covers pinning a version and loading the package with or without a bundler.
+Versions are ordinary semver, so `^0.2.0` takes every later 0.2 release; `npm install oidc-caep-client@next` gets the latest pre-release built from `develop`. [Installing](reference.md#installing) in the reference covers pinning a version and loading the package with or without a bundler.
 
 ## Where to read
 
