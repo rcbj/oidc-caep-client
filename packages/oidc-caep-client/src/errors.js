@@ -30,6 +30,11 @@ export class ValidationError extends OIDCClientError {}
 
 /** A Security Event Token could not be accepted. `code` is an RFC 8935 §2.3 error code. */
 export class SETValidationError extends OIDCClientError {
+  /**
+   * @param {string} message
+   * @param {string} [code]  The RFC 8935/8936 error code reported to the transmitter.
+   * @param {unknown} [cause]
+   */
   constructor(message, code = 'invalid_request', cause) {
     super(message, { code, cause });
   }

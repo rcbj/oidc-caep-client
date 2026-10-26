@@ -6,9 +6,28 @@ const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
  * Immutable-ish holder for a token endpoint response. Serializable via toJSON()/TokenSet.from().
  */
 export class TokenSet {
+  // The members a token response can have. Declared so TypeScript knows them; the constructor fills in
+  // whichever the response carried, and the rest stay undefined (JSON storage drops them).
+  /** @type {string} */
+  access_token;
+  /** @type {string} 'Bearer' or 'DPoP'. */
+  token_type;
+  /** @type {string|undefined} */
+  refresh_token;
+  /** @type {string|undefined} */
+  id_token;
+  /** @type {string|undefined} */
+  scope;
+  /** @type {number|undefined} Epoch seconds when the access token expires. */
+  expires_at;
+  /** @type {number|undefined} Epoch seconds when the tokens were issued. */
+  issued_at;
+  /** @type {Record<string, any>|undefined} The validated ID token's claims. */
+  claims;
+
   /**
-   * @param {object} tokens  Token endpoint response (snake_case), optionally with `expires_at` (epoch seconds).
-   * @param {object} [claims] Validated ID token claims, if an ID token was issued.
+   * @param {Record<string, any>} tokens  Token endpoint response (snake_case), optionally with `expires_at` (epoch seconds).
+   * @param {Record<string, any>} [claims] Validated ID token claims, if an ID token was issued.
    */
   constructor(tokens, claims) {
     const { expires_in, claims: _ignored, ...rest } = tokens;
@@ -49,11 +68,15 @@ export class TokenSet {
     return this.expires_at - this.effectiveSkew(skewSec) <= Math.floor(Date.now() / 1000);
   }
 
+  /** @returns {Record<string, any>} */
   toJSON() {
     return { ...this };
   }
 
-  /** @param {TokenSet|object} value */
+  /**
+   * @param {TokenSet|Record<string, any>} value  A TokenSet, or one as stored (`toJSON()`).
+   * @returns {TokenSet}
+   */
   static from(value) {
     if (!value || value instanceof TokenSet) return value;
     const { claims, ...tokens } = value;

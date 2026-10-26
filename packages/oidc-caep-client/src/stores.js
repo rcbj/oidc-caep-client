@@ -8,6 +8,8 @@
  * @property {(key: string) => Promise<void>|void} delete
  */
 
+/** @typedef {Record<string, any>} StoredTokens  A token set as a store keeps it (`TokenSet#toJSON()`). */
+
 /**
  * Tokens in memory only (the default, and what the browser-based apps BCP recommends): nothing
  * persists, so a page reload means signing in again, and nothing is left behind in storage for
@@ -15,9 +17,13 @@
  */
 export class MemoryTokenStore {
   #map = new Map();
+  /** @param {string} key @returns {StoredTokens|undefined} */
   get(key) { return this.#map.get(key); }
+  /** @param {string} key @param {StoredTokens} value */
   set(key, value) { this.#map.set(key, value); }
+  /** @param {string} key */
   delete(key) { this.#map.delete(key); }
+  /** @returns {string[]} */
   keys() { return [...this.#map.keys()]; }
 }
 
@@ -37,12 +43,15 @@ export class WebStorageTokenStore {
     this.#prefix = prefix;
   }
 
+  /** @param {string} key @returns {StoredTokens|undefined} */
   get(key) {
     const raw = this.#storage.getItem(this.#prefix + key);
     return raw ? JSON.parse(raw) : undefined;
   }
 
+  /** @param {string} key @param {StoredTokens} value */
   set(key, value) { this.#storage.setItem(this.#prefix + key, JSON.stringify(value)); }
+  /** @param {string} key */
   delete(key) { this.#storage.removeItem(this.#prefix + key); }
 }
 
@@ -83,8 +92,11 @@ export class IndexedDBTokenStore {
     }
   }
 
+  /** @param {string} key @returns {Promise<StoredTokens|undefined>} */
   get(key) { return this.#tx('readonly', (s) => s.get(key)); }
+  /** @param {string} key @param {StoredTokens} value */
   async set(key, value) { await this.#tx('readwrite', (s) => s.put(value, key)); }
+  /** @param {string} key */
   async delete(key) { await this.#tx('readwrite', (s) => s.delete(key)); }
 }
 
@@ -107,13 +119,18 @@ export class TransactionStore {
     this.#prefix = prefix;
   }
 
+  /** @param {string} id @param {Record<string, any>} transaction */
   set(id, transaction) {
     const value = JSON.stringify(transaction);
     if (this.#storage) this.#storage.setItem(this.#prefix + id, value);
     else this.#memory.set(id, value);
   }
 
-  /** Reads and removes a transaction. */
+  /**
+   * Reads and removes a transaction.
+   * @param {string} id
+   * @returns {Record<string, any>|undefined}
+   */
   take(id) {
     if (typeof id !== 'string' || !id) return undefined;
     let raw;
@@ -127,7 +144,10 @@ export class TransactionStore {
     return raw ? JSON.parse(raw) : undefined;
   }
 
-  /** Removes transactions older than `maxAgeMs` (abandoned sign-ins). */
+  /**
+   * Removes transactions older than `maxAgeMs` (abandoned sign-ins).
+   * @param {number} maxAgeMs
+   */
   sweep(maxAgeMs) {
     const cutoff = Date.now() - maxAgeMs;
     const expired = (raw) => {

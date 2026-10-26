@@ -1,0 +1,18 @@
+{
+  // Type-checks code using the published package, resolved through package.json's "exports" the way an app
+  // would: consumer.ts (TypeScript), consumer.js (JavaScript with // @ts-check), and the documentation's ```ts
+  // examples (doc-examples/, copied there by extract-doc-examples.mjs). Nothing is emitted.
+  // Run with `npm run test:types`, which builds the declarations first.
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "allowJs": true,
+    "checkJs": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "skipLibCheck": false
+  },
+  "include": ["consumer.ts", "consumer.js", "doc-examples/*.ts"]
+}

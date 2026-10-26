@@ -29,7 +29,7 @@ const NAMED_HANDLERS = {
  * @property {string} type              Event type URI.
  * @property {string} name              Short name, e.g. "session-revoked".
  * @property {Record<string, any>} payload  The event-specific object from the SET `events` claim.
- * @property {object|undefined} subject RFC 9493 subject identifier (`sub_id`, or legacy `subject` inside the event).
+ * @property {Record<string, any>|undefined} subject RFC 9493 subject identifier (`sub_id`, or legacy `subject` inside the event).
  * @property {number|undefined} eventTimestamp  CAEP `event_timestamp` (seconds), falling back to SET `toe`/`iat`.
  * @property {string|undefined} initiatingEntity  "admin" | "user" | "policy" | "system"
  * @property {Record<string,string>|undefined} reasonAdmin
@@ -46,7 +46,23 @@ const NAMED_HANDLERS = {
 /**
  * @callback SecurityEventHandler
  * @param {SecurityEvent} event
- * @returns {void|Promise<void>}
+ * @returns {unknown} Anything; a promise is awaited before the SET is acknowledged.
+ */
+
+/**
+ * @typedef {object} SSFErrorContext  Where an error came from.
+ * @property {'poll'|'handler'|'hook'|'stop'|'error'} phase  `poll`: polling or validating a SET; `handler`: a
+ *           handler threw; `hook`: `onEventReceived` threw; `stop`: sending the last acknowledgements failed.
+ * @property {string} [jti]          The SET concerned, when there is one.
+ * @property {SecurityEvent} [event] The event whose handler threw.
+ * @property {boolean} [willRetry]   The SET was left for the transmitter to send again.
+ */
+
+/**
+ * @callback SSFErrorHandler
+ * @param {Error & { code?: string }} error
+ * @param {SSFErrorContext} context
+ * @returns {void}
  */
 
 /**
@@ -54,7 +70,8 @@ const NAMED_HANDLERS = {
  * event and its `jti` only. The payload and subject can carry personal data (email, phone, session id,
  * IP address), and a console is read by extensions and error reporters, so they are left out.
  * Call it from your own hook to keep the line.
- * @type {SecurityEventHandler}
+ * @param {SecurityEvent} event
+ * @returns {void}
  */
 export function logEventReceived(event) {
   console.log(`[oidc-caep-client] CAEP event received: ${event.name} (jti ${event.jti})`);
@@ -166,25 +183,65 @@ export class SSFReceiver {
   // Handler registration — one per CAEP event, plus generic hooks
   // ---------------------------------------------------------------------------
 
-  /** CAEP session-revoked: the session(s) for the subject were revoked; terminate local sessions. */
+  /**
+   * CAEP session-revoked: the session(s) for the subject were revoked; terminate local sessions.
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onSessionRevoked(handler) { return this.onEvent(CAEP.SESSION_REVOKED, handler); }
-  /** CAEP token-claims-change: claims in previously issued tokens changed (payload.claims). */
+  /**
+   * CAEP token-claims-change: claims in previously issued tokens changed (payload.claims).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onTokenClaimsChange(handler) { return this.onEvent(CAEP.TOKEN_CLAIMS_CHANGE, handler); }
-  /** CAEP credential-change: a credential was created/revoked/updated/deleted (payload.credential_type, change_type). */
+  /**
+   * CAEP credential-change: a credential was created/revoked/updated/deleted (payload.credential_type, change_type).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onCredentialChange(handler) { return this.onEvent(CAEP.CREDENTIAL_CHANGE, handler); }
-  /** CAEP assurance-level-change: authentication assurance changed (payload.current_level, previous_level, change_direction). */
+  /**
+   * CAEP assurance-level-change: authentication assurance changed (payload.current_level, previous_level, change_direction).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onAssuranceLevelChange(handler) { return this.onEvent(CAEP.ASSURANCE_LEVEL_CHANGE, handler); }
-  /** CAEP device-compliance-change: device compliance changed (payload.current_status: "compliant" | "not-compliant"). */
+  /**
+   * CAEP device-compliance-change: device compliance changed (payload.current_status: "compliant" | "not-compliant").
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onDeviceComplianceChange(handler) { return this.onEvent(CAEP.DEVICE_COMPLIANCE_CHANGE, handler); }
-  /** CAEP session-established: a new session was established (payload.acr, amr, fp_ua, ext_id). */
+  /**
+   * CAEP session-established: a new session was established (payload.acr, amr, fp_ua, ext_id).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onSessionEstablished(handler) { return this.onEvent(CAEP.SESSION_ESTABLISHED, handler); }
-  /** CAEP session-presented: a session was presented to a service (payload.fp_ua, ext_id). */
+  /**
+   * CAEP session-presented: a session was presented to a service (payload.fp_ua, ext_id).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onSessionPresented(handler) { return this.onEvent(CAEP.SESSION_PRESENTED, handler); }
-  /** CAEP risk-level-change: the risk level of a principal changed (payload.current_level, previous_level, risk_reason, principal). */
+  /**
+   * CAEP risk-level-change: the risk level of a principal changed (payload.current_level, previous_level, risk_reason, principal).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onRiskLevelChange(handler) { return this.onEvent(CAEP.RISK_LEVEL_CHANGE, handler); }
-  /** SSF verification event (payload.state). */
+  /**
+   * SSF verification event (payload.state).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onVerification(handler) { return this.onEvent(SSF.VERIFICATION, handler); }
-  /** SSF stream-updated event (payload.status, payload.reason). */
+  /**
+   * SSF stream-updated event (payload.status, payload.reason).
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onStreamUpdated(handler) { return this.onEvent(SSF.STREAM_UPDATED, handler); }
 
   /**
@@ -199,14 +256,31 @@ export class SSFReceiver {
     return this;
   }
 
-  /** Called for every accepted event, after type-specific handlers. */
+  /**
+   * Called for every accepted event, after type-specific handlers.
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onAnyEvent(handler) { assertFn(handler); this.#anyHandlers.add(handler); return this; }
-  /** Called for events with no type-specific handler. */
+  /**
+   * Called for events with no type-specific handler.
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   onUnhandledEvent(handler) { assertFn(handler); this.#unhandledHandlers.add(handler); return this; }
-  /** Called with (error, context) when a SET is rejected, a handler throws, or polling fails. */
+  /**
+   * Called with (error, context) when a SET is rejected, a handler throws, or polling fails.
+   * @param {SSFErrorHandler} handler
+   * @returns {this}
+   */
   onError(handler) { assertFn(handler); this.#errorHandlers.add(handler); return this; }
 
-  /** Removes a handler previously registered with onEvent / on<Name>. */
+  /**
+   * Removes a handler previously registered with onEvent / on<Name>.
+   * @param {string} eventType
+   * @param {SecurityEventHandler} handler
+   * @returns {this}
+   */
   off(eventType, handler) {
     this.#handlers.get(eventType)?.delete(handler);
     return this;
