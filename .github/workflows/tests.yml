@@ -5,7 +5,7 @@
 # what a browser needs.
 #
 #   test    `npm test` (node:test against the strict in-memory OP and SSF transmitter in
-#           packages/oidc-caep-client/test) on every Node version package.json's engines allow,
+#           packages/oidc-caep-client/test) on the Node version package.json's engines require (24.22.1),
 #           and the check that the committed package.json versions follow VERSION.
 #   demo    builds the image from the repo-root Dockerfile, starts it, waits for its health check,
 #           and requests the pages and modules the SPA loads. It also checks the security headers
@@ -37,8 +37,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The lowest version engines allow, the Dockerfile's, and iya-sts's pin.
-        node: ['20', '22', '24.22.1']
+        # 24.22.1, the 21 October 2026 security release fixing HTTP2Shell / Node2Shell (CVE-2026-111497):
+        # the version engines require, the Dockerfile's, and iya-sts's pin. Node 20 and 22 below it are left out.
+        node: ['24.22.1']
     steps:
       - name: Check out
         uses: actions/checkout@v4
