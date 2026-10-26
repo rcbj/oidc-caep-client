@@ -23,6 +23,8 @@ ADMIN_API_CLIENT_SECRET=… npm run register-iya-sts
 
 `scripts/register-iya-sts-client.mjs` mints a management API token the way `iya-sts/tests/tools/admin-api-token.js` does (`sts-management-api`, client credentials, audience `<issuer>/admin-api`) and creates the public client (`token_endpoint_auth_method: none`) with this page's redirect URIs, the file's scopes, and this origin allowed for CORS. The secret is `ADMIN_API_CLIENT_SECRET` or `STS_ADMIN_API_CLIENT_SECRET`. Pass `--public-url` when the demo is not on `http://localhost:3000`.
 
+iya-sts issues `ssf.read` and `ssf.manage` only through its native roles: the person must be in the role's group (`ssf-read`, `ssf-manage`) and the application must be an application member of the role (`SSF_READ`, `SSF_MANAGE`). For each of the two scopes `oidc.json` names, the script adds the application to that role. It also creates a test user, `caep-demo-user` by default (`--test-user name`, or `--no-test-user` to skip), and adds it to those groups. The user's password is `CAEP_DEMO_USER_PASSWORD`, or one is generated and printed once; an existing user keeps its password.
+
 These stay on without a setting in the file:
 
 - **DPoP**, with the key kept in this tab's session storage;
