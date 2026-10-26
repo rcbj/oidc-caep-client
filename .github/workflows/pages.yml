@@ -9,13 +9,16 @@
 # dependency in package.json.
 #
 # WHAT THE SITE IS MADE OF. docs/ is the site's frame (config, layouts, sidebar,
-# styles) and its home page. The two documents are the package's own files,
-# written once and read in the repository and on npm as well:
+# styles) and its pages. Two documents are the package's own files, written once
+# and read in the repository and on npm as well:
 #
 #   packages/oidc-caep-client/docs/spa-guide.md  ->  spa-guide.html
 #   packages/oidc-caep-client/README.md          ->  reference.html
 #
-# They are copied into a staging copy of docs/ before Jekyll runs. Their few
+# And two API references are generated from the source's JSDoc, at /api/
+# (TypeDoc) and /jsdoc/ (jsdoc): see "Generate the API references" below.
+#
+# The two documents are copied into a staging copy of docs/ before Jekyll runs. Their few
 # links that point outside the package (`../README.md`, `../../../demo/...`,
 # `docs/spa-guide.md`, `LICENSE`) are rewritten there: to the page beside them,
 # or to the file on GitHub at the commit being built. A guard then fails the
@@ -39,6 +42,9 @@ on:
       - docs/**
       - packages/oidc-caep-client/README.md
       - packages/oidc-caep-client/docs/**
+      # The API references are generated from the source's JSDoc.
+      - packages/oidc-caep-client/src/**
+      - tools/apidocs/**
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -114,6 +120,34 @@ jobs:
             fi
           done
           echo "Built $(find _site -name '*.html' | wc -l) page(s)."
+
+      # THE API REFERENCES, generated from the source's JSDoc by tools/apidocs (a package of its own:
+      # TypeDoc runs on TypeScript 6, the library builds its declarations with 7):
+      #   /api/     TypeDoc, the TypeScript view: every export with its TypeScript signature.
+      #   /jsdoc/   the jsdoc tool's reference, with the exact TypeScript type beside any jsdoc can't parse.
+      # Copied in after Jekyll, which would skip their underscored file names.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+
+      - name: Generate the API references
+        working-directory: tools/apidocs
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Add the API references to the site
+        run: |
+          for ref in api jsdoc; do
+            if [ ! -f "_site_api/${ref}/index.html" ]; then
+              echo "_site_api/${ref}/index.html is missing." >&2
+              exit 1
+            fi
+            sudo mkdir -p "_site/${ref}"
+            sudo cp -r "_site_api/${ref}/." "_site/${ref}/"
+            echo "${ref}: $(find "_site/${ref}" -name '*.html' | wc -l) page(s)."
+          done
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

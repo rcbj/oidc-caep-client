@@ -129,9 +129,9 @@ const SSF_URL_MEMBERS = ['jwks_uri', 'configuration_endpoint', 'status_endpoint'
  * Any other event type (e.g. RISC) can be handled with `onEvent(uri, handler)`.
  */
 export class SSFReceiver {
-  /** @type {Record<string, any>} Transmitter metadata. */
+  /** Transmitter metadata. @type {Record<string, any>} */
   metadata;
-  /** @type {Record<string, any>} Current stream configuration. */
+  /** Current stream configuration. @type {Record<string, any>} */
   stream;
 
   #cfg;

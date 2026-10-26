@@ -1,0 +1,23 @@
+{
+  "source": {
+    "include": [
+      "../../packages/oidc-caep-client/src"
+    ],
+    "includePattern": "\\.js$"
+  },
+  "recurseDepth": 5,
+  "plugins": [
+    "plugins/markdown",
+    "./jsdoc-typescript-types.cjs"
+  ],
+  "opts": {
+    "destination": "../../_site_api/jsdoc",
+    "recurse": true
+  },
+  "templates": {
+    "cleverLinks": true,
+    "default": {
+      "includeDate": false
+    }
+  }
+}
