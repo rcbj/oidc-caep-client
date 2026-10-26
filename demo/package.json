@@ -1,6 +1,6 @@
 {
   "name": "oidc-caep-demo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "./server.js",
@@ -10,7 +10,7 @@
   "dependencies": {
     "express": "^5.2.1",
     "jose": "^6.2.12",
-    "oidc-caep-client": "0.1.0"
+    "oidc-caep-client": "0.2.0"
   },
   "license": "MIT",
   "author": "Iya CyberSecurity Solutions, LLC"

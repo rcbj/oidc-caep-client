@@ -1,6 +1,6 @@
 {
   "name": "oidc-caep-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "In-browser OpenID Connect public client (PKCE, PAR, DPoP, RFC 9207) with token caching/auto-refresh and a Shared Signals (SSF) / CAEP event receiver",
   "homepage": "https://rcbj.github.io/oidc-caep-client/",
   "repository": {
