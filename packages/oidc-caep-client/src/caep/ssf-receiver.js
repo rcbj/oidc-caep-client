@@ -50,6 +50,15 @@ const NAMED_HANDLERS = {
  */
 
 /**
+ * The default `onEventReceived` hook: prints one line per accepted event to the console.
+ * Call it from your own hook to keep the line.
+ * @type {SecurityEventHandler}
+ */
+export function logEventReceived(event) {
+  console.log(`[oidc-caep-client] CAEP event received: ${event.name} (jti ${event.jti})`, event);
+}
+
+/**
  * @typedef {object} SSFReceiverConfig
  * @property {string} transmitterIssuer  SSF transmitter issuer; metadata is loaded from its `/.well-known/ssf-configuration`.
  * Delivery is RFC 8936 POLL: a browser cannot receive a push. (SETs obtained any other way can still be
@@ -71,6 +80,10 @@ const NAMED_HANDLERS = {
  * @property {number} [httpTimeoutMs]
  * @property {typeof fetch} [fetch]
  * @property {Partial<Record<keyof typeof NAMED_HANDLERS, SecurityEventHandler>>} [handlers]
+ * @property {SecurityEventHandler|null} [onEventReceived]  Your logic for every accepted event: called
+ *           once per event, before the typed handlers, and awaited. Default `logEventReceived`, which
+ *           prints the event to the console. `null` turns it off. A throw goes to `onError` with
+ *           `phase: 'hook'`, and the typed handlers still run.
  */
 
 /**
@@ -114,8 +127,10 @@ export class SSFReceiver {
       jtiCacheSize: 10_000,
       httpTimeoutMs: 10_000,
       description: 'oidc-caep-client receiver',
+      onEventReceived: logEventReceived,
       ...config,
     };
+    if (this.#cfg.onEventReceived != null) assertFn(this.#cfg.onEventReceived);
     if (this.#cfg.deliveryMethod && this.#cfg.deliveryMethod !== 'poll') {
       throw new TypeError('Only poll delivery (RFC 8936) is supported: a browser cannot receive a push');
     }
@@ -502,6 +517,13 @@ export class SSFReceiver {
     }
     if (evt.type === SSF.STREAM_UPDATED && this.stream) {
       this.stream = { ...this.stream, status: evt.payload.status };
+    }
+    if (this.#cfg.onEventReceived) {
+      try {
+        await this.#cfg.onEventReceived(evt);
+      } catch (err) {
+        this.#emitError(err, { phase: 'hook', event: evt });
+      }
     }
     const specific = this.#handlers.get(evt.type);
     const handlers = specific?.size ? [...specific] : [...this.#unhandledHandlers];

@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { calculateJwkThumbprint, decodeProtectedHeader, exportJWK, generateKeyPair, importJWK, jwtVerify, SignJWT } from 'jose';
 import {
-  AccountManager, CAEP, clearDiscoveryCache, DPoPKey, needsInteraction, OAuthError, OIDCClient, registerClient, SETValidationError, SSF, SSFReceiver, Subject,
+  AccountManager, CAEP, clearDiscoveryCache, DPoPKey, logEventReceived, needsInteraction, OAuthError, OIDCClient, registerClient, SETValidationError, SSF, SSFReceiver, Subject,
   MemoryTokenStore, subjectMatches, TokenManager, TransactionStore, WebStorageKeyStore,
 } from '../src/index.js';
 import { onceEvent } from '../src/util.js';
@@ -845,6 +845,8 @@ describe('SSF / CAEP receiver (poll)', () => {
       authorizationHeaders: (req) => client.resourceHeaders(tokens, req),
       fetch: op.fetch,
       pollIntervalMs: 50,
+      // Quiet unless a test is about the hook: the default prints every event.
+      onEventReceived: null,
       ...rest,
     });
   }
@@ -900,6 +902,47 @@ describe('SSF / CAEP receiver (poll)', () => {
     for (const type of Object.values(CAEP)) await r.receiveSet(await op.makeSet(stream(r), type, {}, Subject.email('bob@example.com')));
     assert.equal(seen.size, 8);
     await r.stop();
+  });
+
+  it('calls onEventReceived for every event before the typed handlers, and logs by default', async () => {
+    const order = [];
+    const r = await receiver({ onEventReceived: (e) => order.push(`hook:${e.name}`) });
+    r.onSessionRevoked((e) => order.push(`typed:${e.name}`));
+    await r.start();
+    await r.receiveSet(await op.makeSet(stream(r), CAEP.SESSION_REVOKED, {}, Subject.email('bob@example.com')));
+    await r.receiveSet(await op.makeSet(stream(r), CAEP.RISK_LEVEL_CHANGE, {}, Subject.email('bob@example.com')));
+    assert.deepEqual(order, ['hook:session-revoked', 'typed:session-revoked', 'hook:risk-level-change']);
+    await r.stop();
+
+    const errors = [];
+    const failing = await receiver({ onEventReceived: () => { throw new Error('boom'); } });
+    failing.onError((err, ctx) => errors.push(`${ctx.phase}:${err.message}`));
+    let typed = 0;
+    failing.onSessionRevoked(() => { typed += 1; });
+    await failing.start();
+    await failing.receiveSet(await op.makeSet(stream(failing), CAEP.SESSION_REVOKED, {}, Subject.email('bob@example.com')));
+    assert.deepEqual(errors, ['hook:boom']);
+    assert.equal(typed, 1);
+    await failing.stop();
+
+    const lines = [];
+    const original = console.log;
+    console.log = (...args) => lines.push(args[0]);
+    try {
+      const quiet = await receiver();
+      const loud = await receiver({ onEventReceived: logEventReceived });
+      await quiet.start();
+      await loud.start();
+      await quiet.receiveSet(await op.makeSet(stream(quiet), CAEP.CREDENTIAL_CHANGE, {}, Subject.email('bob@example.com')));
+      await loud.receiveSet(await op.makeSet(stream(loud), CAEP.CREDENTIAL_CHANGE, {}, Subject.email('bob@example.com')));
+      await quiet.stop();
+      await loud.stop();
+    } finally {
+      console.log = original;
+    }
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^\[oidc-caep-client\] CAEP event received: credential-change \(jti /);
+    assert.throws(() => new SSFReceiver({ transmitterIssuer: op.issuer, onEventReceived: 'log' }), /function/);
   });
 
   it('validates SETs: signature, audience, typ, age, replay', async () => {

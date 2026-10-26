@@ -9,7 +9,7 @@ export { DPoPKey, DPoPNonceCache, IndexedDBKeyStore, MemoryKeyStore, WebStorageK
 export { discoverOpenIdProvider, discoverSSFTransmitter, oidcDiscoveryUrl, validateOpenIdProviderMetadata, clearDiscoveryCache } from './discovery.js';
 export { generateCodeVerifier, codeChallengeS256, randomToken } from './pkce.js';
 export { OIDCClientError, OAuthError, ValidationError, SETValidationError, SSFError } from './errors.js';
-export { SSFReceiver } from './caep/ssf-receiver.js';
+export { SSFReceiver, logEventReceived } from './caep/ssf-receiver.js';
 export { CAEP, SSF, RISC, DELIVERY, eventName } from './caep/constants.js';
 export { Subject, subjectMatches } from './caep/subjects.js';
 export { Emitter } from './util.js';
