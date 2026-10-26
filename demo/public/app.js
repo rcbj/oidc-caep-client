@@ -216,7 +216,6 @@ const acr = () => ({ acrValues: config.acrValues || undefined });
 // ignored unless the request asks for it (OIDC Core §11).
 const signIn = () => go((m) => m.signIn({ ...acr(), prompt: 'login consent' }));
 const addAccount = () => go((m) => m.addAccount(acr()));
-const chooseAccount = () => go((m) => m.chooseAccount(acr()));
 const resume = (key) => go((m) => m.resume(key, acr()), 'silent sign-in');
 const reauthenticate = (key) => go((m) => m.reauthenticate(key, acr()));
 
@@ -649,8 +648,12 @@ function renderWho(list) {
   if (!list.length) return who.replaceChildren(el('button', { class: 'btn primary', onclick: () => signIn() }, 'Sign in'));
   const cur = accounts.active;
   const others = list.filter((a) => a.key !== cur?.key);
+  // The active account is listed too while it has no session, so that choosing it signs it in.
+  const choices = cur && cur.status !== 'signed-in' ? [cur, ...others] : others;
   const wasOpen = document.querySelector('.acct-menu')?.open;
-  const row = (a) => el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => activate(a.key) },
+  // An account with no session (signed out, or ended) can only come back through a sign-in that names it.
+  const pick = (a) => (a.status === 'signed-in' ? activate(a.key) : (closeMenu(), reauthenticate(a.key)));
+  const row = (a) => el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => pick(a) },
     avatar(a),
     el('span', { class: 'menu-who' }, el('span', {}, labelOf(a)), a.email ? el('span', { class: 'muted small' }, a.email) : ''),
     a.status === 'signed-in' ? '' : el('span', { class: `pill ${STATUS[a.status][0]}` }, STATUS[a.status][1]));
@@ -661,10 +664,9 @@ function renderWho(list) {
       el('span', { class: 'caret', 'aria-hidden': 'true' }, '▾')),
     el('div', { class: 'menu', role: 'menu' },
       el('p', { class: 'menu-head' }, 'Switch account'),
-      ...(others.length ? others.map(row) : [el('p', { class: 'muted small menu-note' }, 'No other account yet.')]),
+      ...(choices.length ? choices.map(row) : [el('p', { class: 'muted small menu-note' }, 'No other account yet.')]),
       el('div', { class: 'menu-sep' }),
       el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => addAccount() }, el('span', { class: 'avatar plus', 'aria-hidden': 'true' }, '+'), 'Sign in with another account'),
-      el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => chooseAccount() }, el('span', { class: 'avatar plus', 'aria-hidden': 'true' }, '⇄'), 'Choose at the identity provider'),
       el('p', { class: 'muted small menu-note' }, 'Switching changes this tab only. The account you leave stays signed in, dormant, and switching back needs no password.'),
       el('div', { class: 'menu-sep' }),
       cur?.status === 'signed-in' ? el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => signOut() }, `Sign out ${labelOf(cur)}`) : '',
