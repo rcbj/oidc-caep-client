@@ -2,13 +2,24 @@
   "name": "oidc-caep-client",
   "version": "0.1.0",
   "description": "In-browser OpenID Connect public client (PKCE, PAR, DPoP, RFC 9207) with token caching/auto-refresh and a Shared Signals (SSF) / CAEP event receiver",
+  "homepage": "https://rcbj.github.io/oidc-caep-client/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rcbj/oidc-caep-client.git",
+    "directory": "packages/oidc-caep-client"
+  },
+  "bugs": {
+    "url": "https://github.com/rcbj/oidc-caep-client/issues"
+  },
   "type": "module",
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js"
   },
+  "sideEffects": false,
   "files": [
     "src",
+    "docs",
     "LICENSE",
     "README.md"
   ],
@@ -37,5 +48,9 @@
   "dependencies": {
     "jose": "^6.2.12"
   },
-  "author": "Iya CyberSecurity Solutions, LLC"
+  "author": "Iya CyberSecurity Solutions, LLC",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
 }

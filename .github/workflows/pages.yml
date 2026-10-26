@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
+# SPDX-License-Identifier: MIT
+#
+# Builds the documentation as a Jekyll site and deploys it to GitHub Pages.
+#
+# The same arrangement as iya-sts (../iya-sts/.github/workflows/pages.yml):
+# GitHub's own configure-pages, jekyll-build-pages and deploy-pages. It needs no
+# secret (the pages/id-token permissions below authorise the deployment) and no
+# dependency in package.json.
+#
+# WHAT THE SITE IS MADE OF. docs/ is the site's frame (config, layouts, sidebar,
+# styles) and its home page. The two documents are the package's own files,
+# written once and read in the repository and on npm as well:
+#
+#   packages/oidc-caep-client/docs/spa-guide.md  ->  spa-guide.html
+#   packages/oidc-caep-client/README.md          ->  reference.html
+#
+# They are copied into a staging copy of docs/ before Jekyll runs. Their few
+# links that point outside the package (`../README.md`, `../../../demo/...`,
+# `docs/spa-guide.md`, `LICENSE`) are rewritten there: to the page beside them,
+# or to the file on GitHub at the commit being built. A guard then fails the
+# build if any `](../` link is left, which would be a 404 on the site.
+#
+# BEFORE THE FIRST RUN, Pages must exist for the repository and build from GitHub
+# Actions. The workflow's token cannot create it (`Resource not accessible by
+# integration`, as iya-sts found); somebody with admin on the repository does it
+# once:
+#
+#     gh api -X POST repos/rcbj/oidc-caep-client/pages -f build_type=workflow
+#
+# or Settings → Pages → Source: GitHub Actions. `enablement: true` is kept for a
+# fork whose runner may have that right.
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - packages/oidc-caep-client/README.md
+      - packages/oidc-caep-client/docs/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+# The three permissions the official flow needs, and no more.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a queued one is not cancelled: a half-finished
+# deployment is a site serving a mixture of two builds.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Stage the site
+        env:
+          BLOB: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf _site_src
+          cp -r docs _site_src
+
+          # Each page gets front matter for its <title>; the markdown below it is the file as written.
+          {
+            printf -- '---\ntitle: Building a browser single-page app\n---\n\n'
+            sed -e 's#](\.\./README\.md#](reference.md#g' \
+                -e "s#](\.\./\.\./\.\./#](${BLOB}/#g" \
+                packages/oidc-caep-client/docs/spa-guide.md
+          } > _site_src/spa-guide.md
+          {
+            printf -- '---\ntitle: API reference\n---\n\n'
+            sed -e 's#](docs/spa-guide\.md#](spa-guide.md#g' \
+                -e "s#](LICENSE)#](${BLOB}/packages/oidc-caep-client/LICENSE)#g" \
+                packages/oidc-caep-client/README.md
+          } > _site_src/reference.md
+
+          # A relative link that still climbs out of the site would be a 404 once published.
+          if grep -nE '\]\(\.\./' _site_src/*.md; then
+            echo "A link above points outside the site; rewrite it in this step." >&2
+            exit 1
+          fi
+
+      # `source: ./_site_src`: the staged copy, so nothing else in the repository is published.
+      # The base URL comes from configure-pages, not from docs/_config.yml.
+      - name: Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./_site_src
+          destination: ./_site
+
+      # jekyll-build-pages succeeds on missing pages too, and the symptom is a blank or partial site.
+      - name: Check the site
+        run: |
+          for page in index.html spa-guide.html reference.html; do
+            if [ ! -f "_site/$page" ]; then
+              echo "_site/$page is missing." >&2
+              ls -la _site || true
+              exit 1
+            fi
+          done
+          echo "Built $(find _site -name '*.html' | wc -l) page(s)."
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
+# SPDX-License-Identifier: MIT
+#
+# Jekyll configuration for the oidc-caep-client documentation site, laid out
+# like iya-sts's (../iya-sts/docs): the `minima` theme GitHub Pages ships, with
+# a sidebar drawn from _data/navigation.yml.
+#
+# ../.github/workflows/pages.yml builds it. This directory holds only the site's
+# frame and its home page. The guide and the API reference are the package's
+# own files (packages/oidc-caep-client/docs/spa-guide.md and README.md), copied
+# in by the workflow, so each is written once and reads the same in the
+# repository, on npm and on the site. Nothing here is installed by
+# `npm install`.
+title: oidc-caep-client
+tagline: documentation
+description: >-
+  An OpenID Connect public client for browser single-page apps: PKCE, PAR,
+  DPoP, token caching and refresh, several accounts per browser, and a Shared
+  Signals receiver with one handler per CAEP event.
+theme: minima
+show_excerpts: false
+
+# The site is served under the repository name on github.io. Internal links are
+# plain relative paths (`spa-guide.md`), which work on the site and in the
+# repository alike; the workflow passes the real base URL from configure-pages.
+baseurl: "/oidc-caep-client"
+
+# GitHub Pages wraps a page with no `layout:` in `default` and turns a link to
+# `foo.md` into `foo.html`. Both are restated so a local `jekyll build` does the
+# same as the published site.
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+plugins:
+  - jekyll-relative-links

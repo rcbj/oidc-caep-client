@@ -4,7 +4,7 @@ An in-browser OpenID Connect client library, plus a demo single-page app. The li
 
 | Path | What it is |
 |---|---|
-| [`packages/oidc-caep-client`](packages/oidc-caep-client) | **The library**: Web APIs only, so it runs in browsers and in Node.js. See its [README](packages/oidc-caep-client/README.md) for the security features and the API. |
+| [`packages/oidc-caep-client`](packages/oidc-caep-client) | **The library**: Web APIs only, so it runs in browsers and in Node.js. See its [SPA guide](packages/oidc-caep-client/docs/spa-guide.md) to build an app with it, and its [README](packages/oidc-caep-client/README.md) for the security features and the API. |
 | [`demo`](demo) | A single-page app, served by a small static server in one container. The OIDC client runs in the browser and reads `demo/public/oidc.json`. |
 
 ## Run the demo
@@ -91,6 +91,19 @@ There are 53 tests. They run against a strict in-memory OP stub that enforces pu
 - **SSF catch-up:** `start({ catchUp: true })` acts on queued SETs before it resolves.
 - **SSF:** poll delivery with a DPoP-bound user token, and SET validation (signature, audience, `typ`, age, replay).
 - **Browser safety:** a check that the library imports no Node.js built-ins.
+
+## Releases and versions
+
+The library is published to npm as [`oidc-caep-client`](https://www.npmjs.com/package/oidc-caep-client) by [`.github/workflows/npm-publish.yml`](.github/workflows/npm-publish.yml). The documentation site at <https://rcbj.github.io/oidc-caep-client/> is built by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) from `docs/`, the package's guide and its README.
+
+Versions follow iya-sts's scheme, **M.N.O** ([`scripts/version.mjs`](scripts/version.mjs)):
+
+- **M.N** is declared in the [`VERSION`](VERSION) file. Bump it there, then run `npm run version:sync` so the committed `package.json` files say `M.N.0`. `npm run version:check` (also run in CI) fails if they don't.
+- **O** is the build number: the UTC build time as `YYYYMMDDHHMMSS`, or `BUILD_NUMBER` when set. CI writes it into the package just before packing, so publishing needs no version commit, and every publish gets a new, increasing version such as `0.1.20261026170512`.
+
+A push to `main` that changes the package publishes it under the npm dist-tag `latest`, and a push to `develop` under `next`. A pull request builds, tests and packs without publishing. Each published commit is tagged `v<version>`, and the package carries npm provenance.
+
+Before the first publish, add an npm access token as the repository secret `NPM_TOKEN`. After it, you can switch to npm trusted publishing and delete the secret; the workflow's header explains both.
 
 ## License
 
