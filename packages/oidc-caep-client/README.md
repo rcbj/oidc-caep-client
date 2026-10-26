@@ -1,6 +1,6 @@
 # oidc-caep-client
 
-An OpenID Connect client library for **browser apps**, configured from the provider's metadata document. It runs as a **public client**: no client secret, and `token_endpoint_auth_method: none`. It covers:
+An OpenID Connect client library for **browser apps**, usable from JavaScript and TypeScript, configured from the provider's metadata document. It runs as a **public client**: no client secret, and `token_endpoint_auth_method: none`. It covers:
 
 - signing users in;
 - caching tokens and refreshing them before they expire;
@@ -31,6 +31,17 @@ That adds it to the `dependencies` in your `package.json`:
 **Versions are `M.N.O`**, where `O` is the UTC time the package was built (`0.1.20261026182841`). So `^0.1.0` takes every later build of 0.1, and nothing from 0.2, which may change the API. For a reproducible build, pin one version (`"oidc-caep-client": "0.1.20261026182841"`) and let your lock file record it.
 
 **Release channels.** `latest` (the default) is built from `main`. `next` is built from `develop`, ahead of a release: `npm install oidc-caep-client@next`.
+
+**TypeScript.** The package ships type declarations (`types/*.d.ts`, generated from the source's JSDoc), so TypeScript finds them through `package.json` with nothing to install or configure. The library itself stays JavaScript, and works the same from both:
+
+```ts
+import { OIDCClient, SSFReceiver, type SecurityEvent, type TokenSet } from 'oidc-caep-client';
+
+const receiver = new SSFReceiver({ transmitterIssuer: 'https://idp.example.com' });
+receiver.onSessionRevoked((evt: SecurityEvent) => signOutLocally(evt.reasonUser?.en));
+```
+
+The exported types include `OIDCClientConfig`, `SSFReceiverConfig`, `SecurityEvent`, `SecurityEventHandler`, `SSFErrorContext`, `TokenSet`, `Account`, `AccountManagerOptions`, `TokenStore` and `KeyStore`. Use `"module": "NodeNext"` (or a bundler's resolution) so TypeScript reads the package's `exports`; the package is ES modules only. In JavaScript, add `// @ts-check` (or `checkJs`) to get the same checking in your editor.
 
 **Loading it in the browser.**
 

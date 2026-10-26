@@ -107,10 +107,17 @@ jobs:
           TARBALL="$(npm pack --silent)"
           echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
           tar -tzf "${TARBALL}" | sed 's/^/  /'
+          # prepack built the TypeScript declarations; they must be in the package.
+          tar -tzf "${TARBALL}" | grep -q '^package/types/index.d.ts$' || { echo "types/index.d.ts is not in the package" >&2; exit 1; }
           # The library must import from what was packed, not from the checkout.
-          mkdir -p /tmp/smoke && cd /tmp/smoke && npm init -y >/dev/null
+          mkdir -p /tmp/smoke && cd /tmp/smoke && npm init -y >/dev/null && npm pkg set type=module
           npm install --no-audit --no-fund "${GITHUB_WORKSPACE}/packages/oidc-caep-client/${TARBALL}"
           node --input-type=module -e "import * as m from 'oidc-caep-client'; for (const n of ['OIDCClient','SSFReceiver','AccountManager','logEventReceived']) if (!m[n]) throw new Error(n + ' is not exported'); console.log('exports ok');"
+          # And from TypeScript, through the package's "types".
+          printf '%s\n' "import { SSFReceiver, type SecurityEvent } from 'oidc-caep-client';" \
+            "new SSFReceiver({ transmitterIssuer: 'https://idp.example.com' }).onSessionRevoked((evt: SecurityEvent) => evt.jti);" > check.ts
+          printf '%s' '{"compilerOptions":{"noEmit":true,"strict":true,"module":"NodeNext","moduleResolution":"NodeNext","target":"ES2022","lib":["ES2022","DOM"]},"files":["check.ts"]}' > tsconfig.json
+          "${GITHUB_WORKSPACE}/node_modules/.bin/tsc" -p tsconfig.json && echo "types ok"
 
       - name: Upload the tarball
         uses: actions/upload-artifact@v4

@@ -11,6 +11,8 @@ npm install
 npm test
 ```
 
+`npm run test:types` builds the TypeScript declarations from the source's JSDoc (`types/`, not committed; `npm pack` builds them too) and type-checks two consumers through the package's `exports`: a TypeScript file and a `// @ts-check` JavaScript file, each with deliberate mistakes that must still fail. It also compiles every ```` ```ts ```` example in the documentation, so an example that no longer matches the API fails the check.
+
 The tests run with `node:test` against a strict in-memory OpenID Provider and SSF transmitter, injected through the library's `fetch` option. The stub enforces public clients, PKCE, PAR and DPoP (proof signature, `htm`/`htu`/`ath`, key binding and nonces). The suite covers:
 
 - state, the front channel, RFC 9207 and the setup checks;
