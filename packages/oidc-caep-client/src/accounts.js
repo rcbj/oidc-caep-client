@@ -110,6 +110,8 @@ export class AccountManager extends Emitter {
   #accounts = new Map();
   #active;
   #activating;
+  /** The change to the shared list this tab is making, if any (see #load). */
+  #mutating;
   #channel;
 
   /**
@@ -603,18 +605,35 @@ export class AccountManager extends Emitter {
     this.emit('change');
   }
 
+  /**
+   * Re-reads the shared list. A change in progress in this tab (#mutate) is waited for first: replacing
+   * the list under it would lose what it is adding, and its write would then persist the stale list,
+   * orphaning the tokens it stored. Never call this from inside a #mutate callback.
+   */
   async #load() {
+    while (this.#mutating) await this.#mutating.catch(() => {});
+    await this.#read();
+  }
+
+  async #read() {
     const saved = await this.#store.get(this.#storeKey);
     this.#accounts = new Map((saved?.accounts ?? []).map((a) => [a.key, a]));
   }
 
   /** Read-modify-write of the shared list, under a lock shared by the tabs; then tells the other tabs. */
   async #mutate(fn) {
-    await withLock(`oidc-caep-client:${this.#storeKey}`, async () => {
-      await this.#load();
+    while (this.#mutating) await this.#mutating.catch(() => {});
+    const run = withLock(`oidc-caep-client:${this.#storeKey}`, async () => {
+      await this.#read();
       await fn();
       await this.#store.set(this.#storeKey, { accounts: [...this.#accounts.values()] });
     });
+    this.#mutating = run;
+    try {
+      await run;
+    } finally {
+      if (this.#mutating === run) this.#mutating = undefined;
+    }
     this.#channel?.postMessage({ type: 'change' });
   }
 }

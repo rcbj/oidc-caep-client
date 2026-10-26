@@ -14,6 +14,10 @@ import { base64url, digest, Emitter, isSecureUrl, timingSafeEqual } from './util
  * JWT `typ` values that mark a token as something other than an ID token. Presenting one of them as an
  * ID token is token confusion (RFC 8725 §3.11), so it is refused even when its signature verifies.
  */
+/** Authorization request parameters `extraParams` may not set: the client sets them, and the callback relies on them. */
+const RESERVED_AUTHORIZATION_PARAMS = Object.freeze(['response_type', 'response_mode', 'client_id', 'redirect_uri', 'state',
+  'nonce', 'code_challenge', 'code_challenge_method', 'dpop_jkt', 'request', 'request_uri', 'resource']);
+
 const NOT_ID_TOKEN_TYPES = ['at+jwt', 'application/at+jwt', 'logout+jwt', 'secevent+jwt', 'dpop+jwt',
   'token-introspection+jwt', 'software-statement+jwt', 'jwt-bearer'];
 
@@ -68,7 +72,10 @@ export class OIDCClient extends Emitter {
   dpopKey;
   #jwks;
   #config;
-  #nonces = new DPoPNonceCache();
+  // RFC 9449 §8 and §9: the authorization server's nonce and a resource server's are separate, even when
+  // both are on one origin (UserInfo at the OP), so each has its own cache.
+  #asNonces = new DPoPNonceCache();
+  #rsNonces = new DPoPNonceCache();
   #usedStates = new Map();
   #usePar = false;
 
@@ -277,6 +284,13 @@ export class OIDCClient extends Emitter {
     if (!redirectUri) throw new TypeError('redirectUri is required');
     if (!c.allowInsecureRequests && !isSecureUrl(redirectUri)) throw new ValidationError(`redirectUri must use https (or loopback http): ${redirectUri}`, { code: 'insecure_redirect_uri' });
 
+    // extraParams adds parameters (e.g. `claims`, `ui_locales`); it may not replace the ones this method
+    // sets for PKCE, state, nonce, the redirect URI, DPoP binding or the response type.
+    const reserved = Object.keys(opts.extraParams ?? {}).filter((k) => RESERVED_AUTHORIZATION_PARAMS.includes(k));
+    if (reserved.length) {
+      throw new TypeError(`extraParams may not set ${reserved.join(', ')}: the client sets them itself`);
+    }
+
     const state = randomToken();
     const nonce = randomToken();
     const codeVerifier = generateCodeVerifier();
@@ -294,8 +308,8 @@ export class OIDCClient extends Emitter {
       login_hint: opts.loginHint,
       id_token_hint: opts.idTokenHint,
       acr_values: opts.acrValues,
-      dpop_jkt: this.dpopKey?.thumbprint,
       ...opts.extraParams,
+      dpop_jkt: this.dpopKey?.thumbprint,
     };
     // offline_access requires prompt=consent per OIDC Core §11 unless the caller chose otherwise.
     if (params.scope.split(' ').includes('offline_access') && params.prompt === undefined) params.prompt = 'consent';
@@ -503,7 +517,7 @@ export class OIDCClient extends Emitter {
       if (!this.dpopKey) throw new OIDCClientError('A DPoP-bound token needs the DPoP key it was issued to', { code: 'dpop_key_missing' });
       return {
         authorization: `DPoP ${accessToken}`,
-        dpop: await this.dpopKey.proof({ method, url, accessToken, nonce: nonce ?? this.#nonces.get(url) }),
+        dpop: await this.dpopKey.proof({ method, url, accessToken, nonce: nonce ?? this.#rsNonces.get(url) }),
       };
     }
     return { authorization: `Bearer ${accessToken}` };
@@ -525,11 +539,11 @@ export class OIDCClient extends Emitter {
       headers: { ...init.headers, ...(await this.resourceHeaders(token, { method, url, nonce })) },
     });
     let res = await send();
-    const nonce = this.#nonces.update(url, res);
+    const nonce = this.#rsNonces.update(url, res);
     if (wantsDpopNonce(res)) {
       await res.body?.cancel();
       res = await send(nonce);
-      this.#nonces.update(url, res);
+      this.#rsNonces.update(url, res);
     }
     return res;
   }
@@ -739,17 +753,17 @@ export class OIDCClient extends Emitter {
     form.set('client_id', this.#config.clientId);
     const send = async (nonce) => {
       const headers = { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' };
-      if (this.dpopKey) headers.dpop = await this.dpopKey.proof({ method: 'POST', url: endpoint, nonce: nonce ?? this.#nonces.get(endpoint) });
+      if (this.dpopKey) headers.dpop = await this.dpopKey.proof({ method: 'POST', url: endpoint, nonce: nonce ?? this.#asNonces.get(endpoint) });
       return httpRequest(endpoint, { ...this.#httpOpts(), method: 'POST', headers, body: form });
     };
     let res = await send();
-    let nonce = this.#nonces.update(endpoint, res);
+    let nonce = this.#asNonces.update(endpoint, res);
     if (this.dpopKey && res.status === 400 && nonce) {
       const text = await res.clone().text();
       if (/"error"\s*:\s*"use_dpop_nonce"/.test(text)) {
         await res.body?.cancel();
         res = await send(nonce);
-        nonce = this.#nonces.update(endpoint, res);
+        nonce = this.#asNonces.update(endpoint, res);
       }
     }
     return readJson(res);
