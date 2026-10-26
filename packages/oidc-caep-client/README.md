@@ -6,7 +6,7 @@ An OpenID Connect client library for **browser apps**, configured from the provi
 - caching tokens and refreshing them before they expire;
 - subscribing to **CAEP** events through the OpenID Shared Signals Framework, with **one handler per CAEP event**.
 
-It uses Web APIs only (`fetch`, WebCrypto, `URL`, Web Storage, IndexedDB), so it runs in browsers and in Node.js 20 or later. Its only dependency is [`jose`](https://github.com/panva/jose).
+It uses Web APIs only (`fetch`, WebCrypto, `URL`, Web Storage, IndexedDB), so it runs in browsers and in Node.js 24.22.1 or later (the release that fixes HTTP2Shell, CVE-2026-111497). Its only dependency is [`jose`](https://github.com/panva/jose).
 
 **New to the library?** [Building a browser single-page app](docs/spa-guide.md) walks through it step by step: setting up the identity provider, serving the page, sign-in, storage, calling APIs, CAEP events and sign-out. This README is the reference.
 

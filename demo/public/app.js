@@ -108,6 +108,14 @@ function labelOf(a) {
   return display || username || a.email || a.sub || '—';
 }
 const initialOf = (a) => String(labelOf(a))[0]?.toUpperCase() ?? '?';
+// The user menu shows labels of up to MENU_LABEL_MAX characters; a longer one is cut, ending in "…",
+// and the full label is its tooltip. Counted in code points, so an accented or emoji name isn't split.
+const MENU_LABEL_MAX = 64;
+function menuLabel(a) {
+  const full = labelOf(a);
+  const chars = Array.from(full);
+  return chars.length > MENU_LABEL_MAX ? `${chars.slice(0, MENU_LABEL_MAX - 1).join('')}…` : full;
+}
 const stateOf = (key) => {
   if (!perAccount.has(key)) perAccount.set(key, { refreshCount: 0, lastRefresh: undefined, stepUp: undefined, notices: [] });
   return perAccount.get(key);
@@ -678,12 +686,12 @@ function renderWho(list) {
   const pick = (a) => (a.status === 'signed-in' ? activate(a.key) : (closeMenu(), reauthenticate(a.key)));
   const row = (a) => el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => pick(a) },
     avatar(a),
-    el('span', { class: 'menu-who' }, el('span', {}, labelOf(a)), a.email ? el('span', { class: 'muted small' }, a.email) : ''),
+    el('span', { class: 'menu-who' }, el('span', { title: labelOf(a) }, menuLabel(a)), a.email ? el('span', { class: 'muted small' }, a.email) : ''),
     a.status === 'signed-in' ? '' : el('span', { class: `pill ${STATUS[a.status][0]}` }, STATUS[a.status][1]));
   const menu = el('details', { class: 'acct-menu' },
     el('summary', { 'aria-label': 'Switch account' },
       cur ? avatar(cur) : '',
-      el('span', { class: 'menu-name' }, cur ? labelOf(cur) : 'Choose an account'),
+      el('span', { class: 'menu-name', title: cur ? labelOf(cur) : '' }, cur ? menuLabel(cur) : 'Choose an account'),
       el('span', { class: 'caret', 'aria-hidden': 'true' }, '▾')),
     el('div', { class: 'menu', role: 'menu' },
       el('p', { class: 'menu-head' }, 'Switch account'),
@@ -692,7 +700,7 @@ function renderWho(list) {
       el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => addAccount() }, el('span', { class: 'avatar plus', 'aria-hidden': 'true' }, '+'), 'Sign in with another account'),
       el('p', { class: 'muted small menu-note' }, 'Switching changes this tab only. The account you leave stays signed in, dormant, and switching back needs no password.'),
       el('div', { class: 'menu-sep' }),
-      cur?.status === 'signed-in' ? el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => signOut() }, `Sign out ${labelOf(cur)}`) : '',
+      cur?.status === 'signed-in' ? el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => signOut() }, `Sign out ${menuLabel(cur)}`) : '',
       el('button', { class: 'menu-row', type: 'button', role: 'menuitem', onclick: () => signOutAll() }, 'Sign out of all accounts')));
   if (wasOpen) menu.open = true;
   who.replaceChildren(menu);
