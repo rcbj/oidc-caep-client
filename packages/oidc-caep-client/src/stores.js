@@ -47,6 +47,48 @@ export class WebStorageTokenStore {
 }
 
 /**
+ * Tokens in IndexedDB, shared by every tab of this origin and kept until deleted. This is the cache an
+ * AccountManager uses for all the accounts signed in in this browser. As with Web Storage, script in the
+ * page can read it: pair it with DPoP so the stored tokens are useless without the non-extractable key.
+ */
+export class IndexedDBTokenStore {
+  #name;
+
+  /** @param {{ database?: string }} [opts] */
+  constructor({ database = 'oidc-caep-client-tokens' } = {}) {
+    if (typeof indexedDB === 'undefined') throw new TypeError('IndexedDB is not available here');
+    this.#name = database;
+  }
+
+  #open() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(this.#name, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('tokens');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async #tx(mode, fn) {
+    const db = await this.#open();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction('tokens', mode);
+        const req = fn(tx.objectStore('tokens'));
+        tx.oncomplete = () => resolve(req.result);
+        tx.onerror = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  get(key) { return this.#tx('readonly', (s) => s.get(key)); }
+  async set(key, value) { await this.#tx('readwrite', (s) => s.put(value, key)); }
+  async delete(key) { await this.#tx('readwrite', (s) => s.delete(key)); }
+}
+
+/**
  * Authorization transactions (state, nonce, PKCE verifier) between the redirect to the OP and the
  * callback. Keyed by `state`; `take()` removes the entry as it reads it, so each transaction — and
  * therefore each authorization response — can be used exactly once.

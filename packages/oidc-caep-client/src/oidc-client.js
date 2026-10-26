@@ -242,7 +242,12 @@ export class OIDCClient extends Emitter {
    * @param {string} [opts.prompt]
    * @param {number} [opts.maxAge]
    * @param {string} [opts.loginHint]
+   * @param {string} [opts.idTokenHint]  A previously issued ID token naming the account (and session) meant.
    * @param {string} [opts.acrValues]  Space-separated; with `enforceAcr`, the ID token's acr must be one of these.
+   * @param {string} [opts.expectedSub] The callback refuses an ID token about anybody else (`account_mismatch`):
+   *           when a request names an account, a sign-in as another person must not be taken for it.
+   * @param {any} [opts.context]       JSON-serialisable data kept with the transaction and handed back by
+   *           `completeAuthorization()` (and on an OAuthError as `err.context`).
    * @param {Record<string,string>} [opts.extraParams]
    * @returns {Promise<{ url: string, state: string }>}
    */
@@ -268,6 +273,7 @@ export class OIDCClient extends Emitter {
       prompt: opts.prompt,
       max_age: opts.maxAge,
       login_hint: opts.loginHint,
+      id_token_hint: opts.idTokenHint,
       acr_values: opts.acrValues,
       dpop_jkt: this.dpopKey?.thumbprint,
       ...opts.extraParams,
@@ -298,6 +304,8 @@ export class OIDCClient extends Emitter {
       redirectUri,
       maxAge: opts.maxAge,
       acrValues: opts.acrValues,
+      expectedSub: opts.expectedSub,
+      context: opts.context,
       issuer: this.metadata.issuer,
       clientId: c.clientId,
       createdAt: Date.now(),
@@ -314,6 +322,18 @@ export class OIDCClient extends Emitter {
    * @returns {Promise<TokenSet>}
    */
   async callback(response) {
+    return (await this.completeAuthorization(response)).tokenSet;
+  }
+
+  /**
+   * `callback()`, also answering the `context` the request was created with. An error the OP returned
+   * (e.g. `login_required` or `account_selection_required` to a `prompt=none` request) is thrown as an
+   * OAuthError carrying that context as `err.context`.
+   *
+   * @param {URLSearchParams|Record<string,string>|string} response
+   * @returns {Promise<{ tokenSet: TokenSet, context: any }>}
+   */
+  async completeAuthorization(response) {
     this.#requireMetadata();
     const c = this.#config;
     const p = toParams(response);
@@ -352,7 +372,9 @@ export class OIDCClient extends Emitter {
       throw new ValidationError('iss missing from authorization response', { code: 'issuer_missing' });
     }
     if (p.get('error')) {
-      throw new OAuthError({ error: p.get('error'), error_description: p.get('error_description') ?? undefined, error_uri: p.get('error_uri') ?? undefined });
+      const err = new OAuthError({ error: p.get('error'), error_description: p.get('error_description') ?? undefined, error_uri: p.get('error_uri') ?? undefined });
+      err.context = transaction.context;
+      throw err;
     }
     const code = p.get('code');
     if (!code) throw new ValidationError('code missing from authorization response', { code: 'code_missing' });
@@ -373,9 +395,17 @@ export class OIDCClient extends Emitter {
       acrValues: transaction.acrValues,
       accessToken: tokens.access_token,
     });
+    // The request named an account; a sign-in as somebody else is not that account.
+    if (transaction.expectedSub !== undefined && claims.sub !== transaction.expectedSub) {
+      await Promise.allSettled([
+        tokens.refresh_token && this.revoke(tokens.refresh_token, 'refresh_token'),
+        this.revoke(tokens.access_token, 'access_token'),
+      ]);
+      throw new ValidationError('The identity provider signed in a different account from the one requested', { code: 'account_mismatch', response: { expected: transaction.expectedSub, sub: claims.sub } });
+    }
     const tokenSet = new TokenSet(tokens, claims);
     this.emit('tokens', tokenSet);
-    return tokenSet;
+    return { tokenSet, context: transaction.context };
   }
 
   #rememberState(state) {
@@ -529,10 +559,11 @@ export class OIDCClient extends Emitter {
   /**
    * Builds an RP-Initiated Logout 1.0 request with a fresh `state`, stored for
    * `validateEndSessionCallback()`. Resolves undefined when the OP has no end_session_endpoint.
-   * @param {{ idTokenHint?: string, postLogoutRedirectUri?: string, logoutHint?: string }} [opts]
+   * `context` is kept with the state and handed back by `completeEndSession()`.
+   * @param {{ idTokenHint?: string, postLogoutRedirectUri?: string, logoutHint?: string, context?: any }} [opts]
    * @returns {Promise<{ url: string, state: string }|undefined>}
    */
-  async createEndSessionRequest({ idTokenHint, postLogoutRedirectUri, logoutHint } = {}) {
+  async createEndSessionRequest({ idTokenHint, postLogoutRedirectUri, logoutHint, context } = {}) {
     this.#requireMetadata();
     if (!this.metadata.end_session_endpoint) return undefined;
     const state = randomToken();
@@ -540,7 +571,7 @@ export class OIDCClient extends Emitter {
     const url = new URL(this.metadata.end_session_endpoint);
     const params = { id_token_hint: idTokenHint, post_logout_redirect_uri: redirect, client_id: this.#config.clientId, logout_hint: logoutHint, state: redirect ? state : undefined };
     for (const [k, v] of Object.entries(params)) if (v) url.searchParams.set(k, v);
-    if (redirect) this.#config.transactionStore.set(`logout:${state}`, { state, createdAt: Date.now() });
+    if (redirect) this.#config.transactionStore.set(`logout:${state}`, { state, context, createdAt: Date.now() });
     return { url: url.href, state };
   }
 
@@ -550,12 +581,22 @@ export class OIDCClient extends Emitter {
    * @param {URLSearchParams|Record<string,string>|string} response
    */
   async validateEndSessionCallback(response) {
+    await this.completeEndSession(response);
+    return true;
+  }
+
+  /**
+   * `validateEndSessionCallback()`, answering the `context` the logout request was created with.
+   * @param {URLSearchParams|Record<string,string>|string} response
+   * @returns {Promise<{ context: any }>}
+   */
+  async completeEndSession(response) {
     const returned = toParams(response).get('state');
     if (!returned) throw new ValidationError('state missing from logout response', { code: 'state_missing' });
     const held = this.#config.transactionStore.take(`logout:${returned}`);
     if (!held || !(await timingSafeEqual(returned, held.state))) throw new ValidationError('Unknown or already-used logout state', { code: 'state_mismatch' });
     if (Date.now() - held.createdAt > this.#config.transactionTtlSec * 1000) throw new ValidationError('The logout took too long', { code: 'transaction_expired' });
-    return true;
+    return { context: held.context };
   }
 
   // ---------------------------------------------------------------------------

@@ -207,3 +207,51 @@ label.check { display: inline-flex; align-items: center; gap: 8px; font-weight: 
 .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 14px; }
 .checks li { padding-left: 22px; position: relative; overflow-wrap: anywhere; }
 .checks li::before { content: "✓"; position: absolute; left: 0; color: var(--ok); font-weight: 700; }
+
+/* Accounts: the switcher in the top bar and the Accounts card */
+.acct-menu { position: relative; }
+.acct-menu > summary { list-style: none; display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border: 1px solid var(--border); border-radius: 999px; }
+.acct-menu > summary::-webkit-details-marker { display: none; }
+.acct-menu > summary:hover, .acct-menu[open] > summary { border-color: var(--accent); }
+.menu-name { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.caret { color: var(--muted); font-size: 12px; }
+.menu {
+  position: absolute; right: 0; top: calc(100% + 8px); width: min(340px, calc(100vw - 32px)); z-index: 10;
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 6px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / .18);
+}
+.menu-head { margin: 6px 10px 4px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.menu-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font: inherit; font-size: 14px;
+  padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); cursor: pointer;
+}
+.menu-row:hover, .menu-row:focus-visible { background: var(--accent-soft); outline: none; }
+.menu-who { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.menu-who > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-note { margin: 4px 10px 6px; }
+.menu-sep { height: 1px; background: var(--border); margin: 6px 4px; }
+.avatar { flex: none; }
+.avatar.plus { background: var(--bg); color: var(--muted); border: 1px dashed var(--border); }
+.badge { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--danger); color: #fff; font: 600 11px/20px system-ui, sans-serif; text-align: center; }
+
+.accounts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.acct { display: flex; align-items: flex-start; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.acct.current { border-color: var(--accent); background: var(--accent-soft); }
+.acct-body { flex: 1; min-width: 0; }
+.acct-body .muted { overflow-wrap: anywhere; }
+.acct-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; }
+.acct-name .pill { font-size: 11px; padding: 1px 8px; }
+.acct-why { color: var(--danger); margin-top: 2px; }
+.acct-side { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.acct-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.small-btn { padding: 4px 10px; font-size: 13px; }
+@media (max-width: 560px) {
+  .acct { flex-wrap: wrap; }
+  .acct-side { flex-direction: row; align-items: center; justify-content: space-between; width: 100%; }
+}
+.banner-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Event log: whose signals */
+.log-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.log-who { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); margin-right: auto; max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-top .evt + .log-who { margin-left: 8px; }
