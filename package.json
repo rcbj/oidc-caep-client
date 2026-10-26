@@ -15,7 +15,7 @@
     "version:sync": "node scripts/version.mjs --sync-manifests"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24.22.1"
   },
   "license": "MIT",
   "author": "Iya CyberSecurity Solutions, LLC"
