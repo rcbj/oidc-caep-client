@@ -303,7 +303,7 @@ await receiver.addSubject(Subject.issSub(user.iss, user.sub)).catch(() => {}); /
 `start()` either opens an existing stream or creates one:
 
 - **Opening an existing stream:** pass its id as `streamId`. Keep the id, for example in `localStorage`, to reopen the same stream later.
-- **Creating a stream:** this needs `ssf.manage`. If the transmitter already has a stream for this person, it is reused.
+- **Creating a stream:** this needs `ssf.manage`. If the transmitter refuses a new one because this person already has a stream (409) or as many as they may hold (403 — iya-sts's answer past `ssf.maxStreams`), an existing one is reused: the one whose `description` is this receiver's, or else the first.
 
 `catchUp: true` handles the events queued while nobody was polling, before `start()` returns. Do this before the person uses the app, so a session revoked in the meantime is acted on first.
 
@@ -412,6 +412,17 @@ Without an `onError`, errors are written to `console.error`, so a lost event alw
 receiver.stop();                              // stop polling; the stream keeps queueing events
 await receiver.stop({ deleteStream: true });  // on sign-out, with ssf.manage: remove the stream
 ```
+
+What happens to the stream in each case:
+
+| When | What happens | What to do |
+|---|---|---|
+| The person signs out | Nothing, unless you delete it. | `stop({ deleteStream: true })` with `ssf.manage` (with `AccountManager`, from `onLeave`). With `ssf.read` only you can't delete it: stop polling. |
+| The provider or a security event ends the session | The tokens are usually revoked already, so a delete is refused. | Stop polling; the transmitter times the stream out. |
+| The tab is closed | Polling stops; the stream stays and keeps queueing events. | Keep the stream id (for example in `localStorage`) and pass it as `streamId` next time, with `catchUp: true`, so the events that arrived meanwhile are handled first. |
+| The id is lost (another browser, cleared storage) | A new stream is created, and the old one is abandoned. | Nothing in the page: the transmitter removes an abandoned stream. iya-sts deletes a person's poll stream that nobody has polled for `ssf.personStreamInactivityTimeoutS` (a day by default). At the transmitter's limit, `start()` reuses an existing stream rather than failing. |
+
+**`deleteOnPageHide: true`** deletes the stream, best effort, when the page is unloaded for good (`pagehide`, not when it enters the back/forward cache), with a `keepalive` request. It is off by default, and we suggest leaving it off: a stream kept between visits holds the events that arrive while no tab is open, which `catchUp` exists to deliver, and a browser may drop a request sent while a page unloads.
 
 ## 10. Sign out
 

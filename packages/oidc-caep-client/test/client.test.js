@@ -195,15 +195,28 @@ async function createStubProvider(opts = {}) {
       if (auth.error === 'use_dpop_nonce') return nonceChallenge();
       if (auth.error) return json({ error: 'invalid_token' }, 401);
       if (p === '/ssf/stream' && method === 'POST') {
+        // iya-sts past ssf.maxStreams: 403, never 409.
+        if (state.streamLimit != null && state.streams.size >= state.streamLimit) {
+          return json({ err: 'access_denied', description: 'at the stream limit' }, 403);
+        }
         const id = rnd();
         const stream = { stream_id: id, iss: issuer, aud: clientId, delivery: { method: data.delivery.method, endpoint_url: `${issuer}/ssf/poll/${id}` },
-          events_requested: data.events_requested, events_delivered: data.events_requested, status: 'enabled', subjects: [], queue: new Map() };
+          events_requested: data.events_requested, events_delivered: data.events_requested, description: data.description,
+          status: 'enabled', subjects: [], queue: new Map() };
         state.streams.set(id, stream);
         const { subjects, queue, ...pub } = stream;
         return json(pub, 201);
       }
+      if (p === '/ssf/stream' && method === 'GET' && !u.searchParams.get('stream_id')) {
+        return json([...state.streams.values()].map(({ subjects, queue, ...pub }) => pub));
+      }
       const stream = state.streams.get(u.searchParams.get('stream_id') ?? data.stream_id ?? p.split('/').pop());
       if (!stream) return json({ error: 'not_found' }, 404);
+      if (p === '/ssf/stream' && method === 'PATCH') {
+        for (const [k, v] of Object.entries(data)) if (k !== 'stream_id') stream[k] = v;
+        const { subjects, queue, ...pub } = stream;
+        return json(pub);
+      }
       if (p === '/ssf/stream' && method === 'GET') {
         const { subjects, queue, ...pub } = stream;
         return json(pub);
@@ -895,6 +908,57 @@ describe('SSF / CAEP receiver (poll)', () => {
 
   it('refuses push delivery: a browser cannot receive one', () => {
     assert.throws(() => new SSFReceiver({ transmitterIssuer: op.issuer, deliveryMethod: 'push' }), /poll/);
+  });
+
+  it('reuses an existing stream when the transmitter refuses a new one at its limit (403), preferring its own description', async () => {
+    op.state.streams.clear();
+    const other = await receiver({ description: 'another app', pollIntervalMs: 60_000 });
+    await other.start();
+    await other.stop();
+    const mine = await receiver({ description: 'this app', pollIntervalMs: 60_000 });
+    await mine.start();
+    await mine.stop();
+    const mineId = mine.stream.stream_id;
+    op.state.streamLimit = 2;
+    try {
+      const again = await receiver({ description: 'this app', pollIntervalMs: 60_000 });
+      await again.start();
+      await again.stop();
+      assert.equal(again.stream.stream_id, mineId);
+      assert.equal(op.state.streams.size, 2);
+      op.state.streams.clear();
+      const none = await receiver({ description: 'this app', pollIntervalMs: 60_000 });
+      op.state.streamLimit = 0;
+      await assert.rejects(none.start(), (e) => e.status === 403);
+    } finally {
+      op.state.streamLimit = null;
+      op.state.streams.clear();
+    }
+  });
+
+  it('deleteOnPageHide deletes the stream with keepalive when the page goes for good, not for the back/forward cache, and is off by default', async () => {
+    const listeners = new Map();
+    const pageEvents = {
+      addEventListener: (type, fn) => listeners.set(type, fn),
+      removeEventListener: (type, fn) => { if (listeners.get(type) === fn) listeners.delete(type); },
+    };
+    const kept = await receiver({ pageEvents, pollIntervalMs: 60_000 });
+    await kept.start();
+    assert.equal(listeners.size, 0, 'off by default');
+    await kept.stop({ deleteStream: true });
+
+    const seen = [];
+    const fetchSpy = (url, init) => { seen.push({ method: init?.method, keepalive: init?.keepalive }); return op.fetch(url, init); };
+    const r = await receiver({ pageEvents, deleteOnPageHide: true, fetch: fetchSpy, pollIntervalMs: 60_000 });
+    await r.start();
+    const id = r.stream.stream_id;
+    listeners.get('pagehide')({ persisted: true });
+    assert.ok(op.state.streams.has(id), 'a page entering the back/forward cache keeps its stream');
+    listeners.get('pagehide')({ persisted: false });
+    await waitFor(() => !op.state.streams.has(id), 'the stream deleted');
+    assert.ok(seen.some((x) => x.method === 'DELETE' && x.keepalive === true));
+    await r.stop();
+    assert.equal(listeners.size, 0, 'stop() removes the listener');
   });
 
   it('creates a poll stream with a DPoP-bound user token, verifies it and dispatches to named handlers', async () => {
