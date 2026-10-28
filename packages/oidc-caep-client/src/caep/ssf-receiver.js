@@ -105,6 +105,13 @@ const SSF_URL_MEMBERS = ['jwks_uri', 'configuration_endpoint', 'status_endpoint'
  *           Default 5. A SET that can't be checked for a reason that may pass (a network error, a signing
  *           key not yet in the JWKS) is never reported as an error: it is left for redelivery until it can.
  * @property {boolean} [allowInsecureRequests] Allow non-TLS SSF URLs other than loopback. Default false.
+ * @property {boolean} [deleteOnPageHide] Delete the stream, best effort, when the page is unloaded for good
+ *           (`pagehide` that is not entering the back/forward cache). Default false: a stream kept across
+ *           visits holds the events that arrive while no tab is open, which `start({ catchUp: true })`
+ *           delivers, and a browser may drop a request sent while a page unloads. Leave it off and let the
+ *           transmitter time an abandoned stream out (iya-sts: `ssf.personStreamInactivityTimeoutS`).
+ * @property {{ addEventListener: Function, removeEventListener: Function }} [pageEvents] Where `pagehide`
+ *           is listened for. Default `globalThis` (the window).
  * @property {string[]} [trustedPollOrigins] Origins besides the transmitter's issuer and
  *           configuration_endpoint that the stream's poll endpoint_url may be at. The poll request carries
  *           the person's access token, so it is refused anywhere else.
@@ -153,6 +160,8 @@ export class SSFReceiver {
   #pendingAcks = [];
   #pendingErrs = {};
   #attempts = new Map();
+  /** The `pagehide` listener `deleteOnPageHide` adds, while it is added. */
+  #onPageHide = undefined;
 
   /** @param {SSFReceiverConfig} config */
   constructor(config) {
@@ -326,8 +335,10 @@ export class SSFReceiver {
 
   /**
    * Discovers the transmitter, creates (or reuses) a stream, and starts polling when using poll delivery.
-   * If the transmitter already has a stream for this receiver (HTTP 409), that stream is reused and
-   * re-pointed at this receiver's delivery settings.
+   * If the transmitter refuses a new stream because this receiver already has one (HTTP 409) or has as many
+   * as it may hold (HTTP 403 — iya-sts's answer past `ssf.maxStreams`), an existing stream is reused and
+   * re-pointed at this receiver's delivery settings: the one whose `description` is this receiver's, or else
+   * the first.
    *
    * With `catchUp`, the SETs already queued on the stream are polled and dispatched before this resolves,
    * e.g. so that a session revoked while the receiver was stopped is acted on before the session is used.
@@ -341,10 +352,10 @@ export class SSFReceiver {
       try {
         this.stream = await this.createStream();
       } catch (err) {
-        if (err.status !== 409) throw err;
-        const existing = await this.listStreams();
+        if (err.status !== 409 && err.status !== 403) throw err;
+        const existing = await this.listStreams().catch(() => []);
         if (!existing.length) throw err;
-        this.stream = existing[0];
+        this.stream = existing.find((s) => s?.description === this.#cfg.description) ?? existing[0];
         this.stream = await this.updateStream({ delivery: this.#deliveryRequest(), events_requested: this.#cfg.eventsRequested });
       }
     } else {
@@ -352,7 +363,30 @@ export class SSFReceiver {
     }
     for (let more = catchUp; more;) ({ moreAvailable: more } = await this.poll());
     this.#startPolling();
+    this.#watchPageHide();
     return this.stream;
+  }
+
+  /** With `deleteOnPageHide`, listens for the page going away for good. */
+  #watchPageHide() {
+    const target = this.#cfg.pageEvents ?? globalThis;
+    if (!this.#cfg.deleteOnPageHide || this.#onPageHide || typeof target?.addEventListener !== 'function') return;
+    this.#onPageHide = (event) => {
+      // A page entering the back/forward cache may come back, polling where it stopped.
+      if (event?.persisted) return;
+      this.#polling = false;
+      clearTimeout(this.#pollTimer);
+      if (this.stream?.stream_id) {
+        this.deleteStream({ keepalive: true }).catch((err) => this.#emitError(err, { phase: 'stop' }));
+      }
+    };
+    target.addEventListener('pagehide', this.#onPageHide);
+  }
+
+  #unwatchPageHide() {
+    if (!this.#onPageHide) return;
+    (this.#cfg.pageEvents ?? globalThis).removeEventListener?.('pagehide', this.#onPageHide);
+    this.#onPageHide = undefined;
   }
 
   /**
@@ -360,6 +394,7 @@ export class SSFReceiver {
    * @param {{ deleteStream?: boolean }} [opts]
    */
   async stop({ deleteStream = false } = {}) {
+    this.#unwatchPageHide();
     this.#polling = false;
     clearTimeout(this.#pollTimer);
     // A poll still running may finish handling SETs; their acknowledgements go in the flush below.
@@ -411,10 +446,14 @@ export class SSFReceiver {
     return this.stream;
   }
 
-  async deleteStream() {
+  /**
+   * Deletes the stream at the transmitter.
+   * @param {{ keepalive?: boolean }} [opts]  `keepalive`: let the request outlive the page (used on `pagehide`).
+   */
+  async deleteStream({ keepalive = false } = {}) {
     const url = new URL(this.#endpoint('configuration_endpoint'));
     url.searchParams.set('stream_id', this.#streamId());
-    await this.#mgmt('DELETE', url);
+    await this.#mgmt('DELETE', url, undefined, { keepalive });
     this.stream = undefined;
   }
 
@@ -813,7 +852,7 @@ export class SSFReceiver {
     return id;
   }
 
-  async #mgmt(method, url, body) {
+  async #mgmt(method, url, body, { keepalive = false } = {}) {
     const href = String(url);
     const send = async (nonce) => {
       const headers = { accept: 'application/json' };
@@ -829,6 +868,7 @@ export class SSFReceiver {
         body: body === undefined ? undefined : JSON.stringify(body),
         timeoutMs: this.#cfg.httpTimeoutMs,
         fetch: this.#cfg.fetch,
+        ...(keepalive ? { keepalive: true } : {}),
       });
     };
     let res = await send();

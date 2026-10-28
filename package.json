@@ -1,5 +1,5 @@
 {
-  "name": "oidc-caep-risc",
+  "name": "oidc-caep-client-monorepo",
   "private": true,
   "type": "module",
   "workspaces": [
