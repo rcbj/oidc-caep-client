@@ -489,7 +489,10 @@ async function deleteStream(account, getTokenSet) {
     await r.discover();
     r.stream = { stream_id: id };
     await r.deleteStream();
-  } catch { /* the transmitter forgets an unused stream on its own */ }
+  } catch {
+    // Left for the transmitter: iya-sts deletes a person's poll stream nobody polls for
+    // ssf.personStreamInactivityTimeoutS (a day by default); another transmitter may keep it.
+  }
 }
 
 // The log used to be shared through localStorage, where every tab could read every account's signals.
