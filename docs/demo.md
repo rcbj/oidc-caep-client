@@ -26,7 +26,7 @@ The default `oidc.json` points at iya-sts on `https://localhost:8081`, client `o
 ADMIN_API_CLIENT_SECRET=… npm run register-iya-sts
 ```
 
-[`scripts/register-iya-sts-client.mjs`](https://github.com/rcbj/oidc-caep-client/blob/main/scripts/register-iya-sts-client.mjs) gets a management API token as `sts-management-api` and:
+[`scripts/register-iya-sts-client.mjs`](https://github.com/rcbj/oidc-caep-client/blob/main/scripts/register-iya-sts-client.mjs) gets a management API token as `sts-api-client` (the client iya-sts seeds for its management API) and:
 
 - creates the public client (`token_endpoint_auth_method: none`) with the demo's redirect URIs, the file's scopes and the demo's origin for CORS;
 - adds the client to `SSF_READ` and `SSF_MANAGE`, for whichever of `ssf.read` and `ssf.manage` the file asks for (iya-sts issues each only when the application is a member of the role and the person is in its group, `ssf-read` or `ssf-manage`);
