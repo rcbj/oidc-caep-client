@@ -8,9 +8,11 @@
  * default file).
  *
  * The access token is minted the way iya-sts/tests/tools/admin-api-token.js
- * mints one for the suite. The seeded client is `sts-management-api`, the
+ * mints one for the suite. The seeded client is `sts-api-client`, the
  * grant is `client_credentials`, authentication is HTTP Basic, and the token
- * is audienced to `<base>/admin-api` with `admin:read admin:write`. The
+ * is audienced to `<base>/admin-api` with `admin:read admin:write`.
+ * (`sts-management-api` is the management API's own resource object, never a
+ * client: iya-sts answers `invalid_client` to a caller presenting it.) The
  * secret is `STS_ADMIN_API_CLIENT_SECRET` or `ADMIN_API_CLIENT_SECRET`, the
  * same variables the test jobs read (tests/protocol/sts_directory_bulk_load_scim.js).
  * On the compose stack that secret lives in OpenBao; docs/management-api.md
@@ -151,7 +153,7 @@ async function mintAdminToken(base, secret) {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
-      authorization: `Basic ${Buffer.from(`sts-management-api:${secret}`).toString('base64')}`,
+      authorization: `Basic ${Buffer.from(`sts-api-client:${secret}`).toString('base64')}`,
     },
     body: form,
   });
@@ -205,7 +207,8 @@ async function ensure(base, token, spec) {
       attribute: 'appAllowedProtocol',
       value: protocol,
     });
-    if (!added.body.ok) throw new Error(`declaring ${protocol} was refused: ${JSON.stringify(added.body).slice(0, 300)}`);
+    const already = [].concat(added.body.errors ?? []).some((one) => /already/i.test(String(one)));
+    if (!added.body.ok && !already) throw new Error(`declaring ${protocol} was refused: ${JSON.stringify(added.body).slice(0, 300)}`);
   }
   for (const [attribute, raw] of Object.entries(spec.fields)) {
     for (const value of valuesOf(raw)) {
@@ -214,7 +217,8 @@ async function ensure(base, token, spec) {
         attribute,
         value,
       });
-      if (!added.body.ok) throw new Error(`adding ${attribute}=${value} was refused: ${JSON.stringify(added.body).slice(0, 300)}`);
+      const already = [].concat(added.body.errors ?? []).some((one) => /already/i.test(String(one)));
+      if (!added.body.ok && !already) throw new Error(`adding ${attribute}=${value} was refused: ${JSON.stringify(added.body).slice(0, 300)}`);
     }
   }
 }
@@ -240,9 +244,11 @@ async function ensureTestUser(base, token, username, scopes) {
     console.log(`User ${username} already exists; its password is unchanged.`);
   } else {
     const password = process.env.CAEP_DEMO_USER_PASSWORD || '';
+    // What a product-mode realm's attribute policy requires of every person (uid is the username).
+    const attributes = { cn: `CAEP Demo ${username}`, givenName: 'CAEP', sn: 'Demo', displayName: `CAEP Demo ${username}`, mail: `${username}@caep-demo.test` };
     const body = password
-      ? { username, invent: false, credential: 'password', password, passwordConfirm: password }
-      : { username, invent: false, credential: 'generate' };
+      ? { username, invent: false, credential: 'password', password, passwordConfirm: password, attributes }
+      : { username, invent: false, credential: 'generate', attributes };
     const created = await admin(base, token, 'POST', '/users/create', body);
     if (!created.body.ok) throw new Error(`creating ${username} was refused: ${JSON.stringify(created.body).slice(0, 300)}`);
     console.log(`Created user ${username}.`);
