@@ -17,6 +17,7 @@ COPY demo/public demo/public
 
 USER node
 EXPOSE 3000
+ENV PORT=3000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s \
-  CMD wget -qO- http://127.0.0.1:3000/ >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:${PORT}/ >/dev/null || exit 1
 CMD ["node", "demo/server.js"]

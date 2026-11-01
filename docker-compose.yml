@@ -3,9 +3,10 @@ services:
     build: .
     image: oidc-caep-demo
     ports:
-      - "${HOST_PORT:-3000}:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     environment:
-      # URL the browser uses to reach the app; the redirect URI is ${PUBLIC_URL}/callback.
-      # The OIDC client runs in the browser: configure the identity provider on the app's front page.
-      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
+      # URL the browser uses. Empty means the server derives http://localhost:$PORT.
+      # The redirect URI is that origin plus /callback.
+      PORT: ${PORT:-3000}
+      PUBLIC_URL: ${PUBLIC_URL-}
     stop_grace_period: 5s

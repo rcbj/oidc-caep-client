@@ -38,6 +38,7 @@
  *     existing user keeps its password.
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import https from 'node:https';
 import { dirname, resolve } from 'node:path';
@@ -57,8 +58,10 @@ function usage() {
 
   --config       OIDC file with metadataUrl, client_id, and scopes
                  (default: demo/public/oidc.json)
-  --public-url   Where the demo is served. The redirect URI is
-                 <public-url>/callback (default: $PUBLIC_URL or http://localhost:3000)
+  --public-url   Where the browser reaches the demo. The redirect URI is
+                 that origin plus /callback (default: a non-empty $PUBLIC_URL).
+                 With neither, the origin is http://localhost:$PORT: the
+                 running demo's PORT, then $PORT, or 3000.
   --test-user    The test user to create and add to ssf-read and ssf-manage
                  (default: caep-demo-user). Its password is $CAEP_DEMO_USER_PASSWORD,
                  or one is generated and printed once.
@@ -67,10 +70,12 @@ function usage() {
 The management API secret is STS_ADMIN_API_CLIENT_SECRET or ADMIN_API_CLIENT_SECRET.`;
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv, env = process.env) {
   const out = {
     config: resolve(repoRoot, 'demo/public/oidc.json'),
-    publicUrl: (process.env.PUBLIC_URL || 'http://localhost:3000').replace(/\/+$/, ''),
+    publicUrl: String(env.PUBLIC_URL || 'http://localhost:3000').replace(/\/+$/, ''),
+    // Set only for --public-url, or for a non-empty PUBLIC_URL. The default origin does not count.
+    publicUrlGiven: Boolean(env.PUBLIC_URL),
     testUser: 'caep-demo-user',
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -80,13 +85,61 @@ function parseArgs(argv) {
       process.exit(0);
     }
     if (arg === '--config') out.config = resolve(argv[++i] ?? '');
-    else if (arg === '--public-url') out.publicUrl = String(argv[++i] ?? '').replace(/\/+$/, '');
+    else if (arg === '--public-url') {
+      out.publicUrl = String(argv[++i] ?? '').replace(/\/+$/, '');
+      out.publicUrlGiven = true;
+    }
     else if (arg === '--test-user') out.testUser = String(argv[++i] ?? '').trim();
     else if (arg === '--no-test-user') out.testUser = '';
     else throw new Error(`Unknown argument ${arg}\n${usage()}`);
   }
   if (!out.publicUrl) throw new Error('--public-url is empty');
   return out;
+}
+
+/** The container's PORT wins. Otherwise the environment. An empty or unusable value is absent. */
+export function demoPort(envPort, containerPortValue) {
+  const raw = String(containerPortValue ?? '').trim() || String(envPort ?? '').trim();
+  if (!raw) return undefined;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined;
+  return port;
+}
+
+// PORT from the running caep-demo container, when compose has one. Any failure (no docker,
+// no container) returns undefined; the environment's PORT is the fallback.
+function containerPort(cwd = repoRoot) {
+  try {
+    const id = execFileSync('docker', ['compose', 'ps', '-q', 'caep-demo'], {
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim().split('\n')[0];
+    if (!id) return undefined;
+    const env = execFileSync('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', id], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return env.split('\n').find((line) => line.startsWith('PORT='))?.slice('PORT='.length);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The redirect URI, the post-logout URI, and the CORS origin the demo registers.
+ * An explicit origin is kept. Otherwise the origin is http://localhost:<port>,
+ * where <port> is the running demo's PORT, then the environment's, or 3000.
+ * The paths stay /callback and /.
+ */
+export function demoUrls(args, env = process.env, readContainerPort = containerPort) {
+  const publicUrl = args.publicUrlGiven
+    ? args.publicUrl
+    : `http://localhost:${demoPort(env.PORT, readContainerPort()) ?? 3000}`;
+  const parsed = new URL(publicUrl);
+  const base = `${parsed.href.replace(/\/+$/, '')}/`;
+  return {
+    origin: parsed.origin,
+    redirectUri: new URL('/callback', base).href,
+    postLogout: new URL('/', base).href,
+  };
 }
 
 function readOidcFile(path) {
@@ -269,9 +322,9 @@ async function main() {
   if (!secret) {
     throw new Error('neither STS_ADMIN_API_CLIENT_SECRET nor ADMIN_API_CLIENT_SECRET is set, so no /admin-api token can be minted. The iya-sts test jobs read the same variables.');
   }
-  const publicUrl = new URL(args.publicUrl);
-  const redirectUri = new URL('/callback', `${publicUrl.href.replace(/\/+$/, '')}/`).href;
-  const postLogout = new URL('/', `${publicUrl.href.replace(/\/+$/, '')}/`).href;
+  const urls = demoUrls(args);
+  const redirectUri = urls.redirectUri;
+  const postLogout = urls.postLogout;
   const token = await mintAdminToken(oidc.base, secret);
   await ensure(oidc.base, token, {
     identifier: oidc.clientId,
@@ -285,7 +338,7 @@ async function main() {
       oauthGrantType: ['authorization_code', 'refresh_token'],
       oauthAllowedScope: oidc.scopes,
       oauthTokenEndpointAuthMethod: 'none',
-      appCorsOrigin: [publicUrl.origin],
+      appCorsOrigin: [urls.origin],
     },
   });
   await grantSsfRoles(oidc.base, token, oidc.clientId, oidc.scopes);
@@ -303,7 +356,9 @@ async function main() {
   console.log(`cors:      ${show('appCorsOrigin')}`);
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
+}
