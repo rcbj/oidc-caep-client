@@ -48,6 +48,8 @@ The secret is `ADMIN_API_CLIENT_SECRET` or `STS_ADMIN_API_CLIENT_SECRET`. Every 
 - **Tokens** for every signed-in account are cached in the tab's session storage; closing the tab clears them.
 - **CAEP:** the stream is created with the person's access token (with a DPoP proof) and polled from the browser. With `ssf.manage`, the person is added as the stream's subject, and the stream asks for the event types picked on the CAEP tab.
 
+`signals` defaults to on. The shipped `oidc.json` does not set it, so the demo still requests `ssf.read` and `ssf.manage` and starts the receiver. `"signals": false` in that file turns CAEP and RISC off. The client drops `ssf.read` and `ssf.manage` from the authorization request even when the file still lists them, and the page does not contact a transmitter. `caep.enabled: false` in the page's in-memory defaults (`CLIENT_DEFAULTS` in `demo/public/app.js`) still skips the receiver. A file value `"signals": false` wins over `caep.enabled: true`.
+
 The page has two tabs:
 
 - **Identity:** sign-in, the protections in effect, the session, the token cache, and the tokens.

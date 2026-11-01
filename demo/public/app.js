@@ -151,6 +151,7 @@ async function applyConfig(cfg) {
     dpop: cfg.dpop ? { keyStore: tabStorage ? new WebStorageKeyStore() : new MemoryKeyStore() } : false,
     idTokenSignedResponseAlg: cfg.idTokenAlg || pickIdTokenAlg(metadata),
     clientId: cfg.clientId,
+    ...(cfg.signals !== undefined ? { signals: cfg.signals } : {}),
   });
   config = { ...cfg, metadata };
   store.set(CONFIG_KEY, config);
@@ -398,9 +399,14 @@ function streamNote(key, status, note) {
   caep.state = { status, transmitter: transmitterIssuer(), note };
 }
 
+/** The receiver stays off when the file sets signals to false, or when caep.enabled is false. */
+function receiverOn() {
+  return config?.signals !== false && !!config?.caep?.enabled;
+}
+
 /** onActivate: read the account's stream and act on what it queued while dormant. */
 async function startCaep(account, getTokenSet) {
-  if (!config?.caep?.enabled) return;
+  if (!receiverOn()) return;
   const key = account.key;
   caep = { key, receiver: undefined, state: { status: 'connecting', transmitter: transmitterIssuer() } };
   render();
@@ -471,7 +477,7 @@ async function startCaep(account, getTokenSet) {
 async function stopCaep(key) {
   if (caep.key !== key) return;
   const r = caep.receiver;
-  caep = { key: undefined, receiver: undefined, state: { status: config?.caep?.enabled ? 'waiting-for-user' : 'disabled' } };
+  caep = { key: undefined, receiver: undefined, state: { status: receiverOn() ? 'waiting-for-user' : 'disabled' } };
   if (r) await r.stop().catch(() => {});
 }
 
@@ -479,7 +485,7 @@ async function stopCaep(key) {
 async function deleteStream(account, getTokenSet) {
   await stopCaep(account.key);
   const id = streamIds()[account.key];
-  if (!id || !config?.caep?.enabled) return;
+  if (!id || !receiverOn()) return;
   let scopes = [];
   try { scopes = scopesOf(await getTokenSet()); } catch { return; }
   if (!canWriteStream(scopes)) return;
@@ -743,7 +749,7 @@ function renderHero(list) {
 
 function renderStream() {
   const me = signedIn();
-  const st = me && caep.key === me.key ? caep : { state: { status: config?.caep?.enabled ? (ui.busy ? 'connecting' : 'waiting-for-user') : 'disabled' } };
+  const st = me && caep.key === me.key ? caep : { state: { status: receiverOn() ? (ui.busy ? 'connecting' : 'waiting-for-user') : 'disabled' } };
   const ssfState = st.state;
   const status = ssfState.status === 'connected' ? ssfState.streamStatus ?? 'enabled' : ssfState.status;
   $('stream-title').textContent = me ? `CAEP stream · ${labelOf(me)}` : 'CAEP stream';
@@ -765,7 +771,7 @@ function renderStream() {
   renderEventPicker(me && caep.key === me.key && caep.receiver ? caep.state : undefined);
   $('btn-verify').disabled = !s || !streamWrite();
   $('btn-verify').title = streamWrite() ? '' : 'Needs the ssf.manage scope';
-  $('btn-reconnect').disabled = !me || !config?.caep?.enabled;
+  $('btn-reconnect').disabled = !me || !receiverOn();
   $('ssf-error').hidden = !ssfState.error;
   $('ssf-error').textContent = ssfState.error ?? '';
   $('live').classList.toggle('on', !!caep.receiver);
@@ -986,7 +992,8 @@ function parseOidcFile(doc) {
   if (!clientId) throw new Error('The configuration file needs client_id.');
   if (!scopes) throw new Error('The configuration file needs scopes.');
   const url = new URL(metadataUrl.includes('/.well-known/') ? metadataUrl : oidcDiscoveryUrl(metadataUrl.replace(/\/+$/, '')));
-  return { metadataUrl: url.href, clientId, scopes };
+  const signals = 'signals' in doc ? doc.signals : undefined;
+  return { metadataUrl: url.href, clientId, scopes, signals };
 }
 
 async function fetchProviderMetadata(metadataUrl) {
@@ -1004,7 +1011,8 @@ async function connectFromFile(doc) {
   const same = client
     && config?.metadataUrl === parsed.metadataUrl
     && config?.clientId === parsed.clientId
-    && config?.scope === parsed.scopes;
+    && config?.scope === parsed.scopes
+    && config?.signals === parsed.signals;
   if (!same) {
     await applyConfig({
       metadata,
@@ -1013,6 +1021,8 @@ async function connectFromFile(doc) {
       scope: parsed.scopes,
       ...CLIENT_DEFAULTS,
       caep: { ...CLIENT_DEFAULTS.caep },
+      // After the defaults, so a file `"signals": false` wins over `caep.enabled: true`.
+      ...(parsed.signals !== undefined ? { signals: parsed.signals } : {}),
     });
   }
 }

@@ -73,4 +73,7 @@ export async function app(): Promise<void> {
   void wrong;
   // @ts-expect-error clientId is required
   await OIDCClient.discover({ issuer: 'https://idp.example.com' });
+  await OIDCClient.discover({ issuer: 'https://idp.example.com', clientId: 'my-spa', signals: false });
+  // @ts-expect-error signals must be a boolean
+  await OIDCClient.discover({ issuer: 'https://idp.example.com', clientId: 'my-spa', signals: 'no' });
 }
