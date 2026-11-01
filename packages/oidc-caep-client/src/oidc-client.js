@@ -24,6 +24,14 @@ const NOT_ID_TOKEN_TYPES = ['at+jwt', 'application/at+jwt', 'logout+jwt', 'secev
 /** Parameters that must never arrive at a code-flow redirect URI (tokens in the front channel). */
 const FRONT_CHANNEL_TOKENS = ['access_token', 'id_token', 'refresh_token', 'token_type'];
 
+/** The only scopes `signals: false` removes. Any other token stays. */
+const SIGNAL_SCOPES = new Set(['ssf.read', 'ssf.manage']);
+
+/** @param {string} scope */
+function scopeWithoutSignals(scope) {
+  return scope.split(' ').filter((token) => !SIGNAL_SCOPES.has(token)).join(' ');
+}
+
 /** Endpoints whose URLs must use TLS. */
 const ENDPOINTS = ['issuer', 'authorization_endpoint', 'token_endpoint', 'jwks_uri', 'userinfo_endpoint',
   'revocation_endpoint', 'end_session_endpoint', 'pushed_authorization_request_endpoint', 'registration_endpoint'];
@@ -36,6 +44,8 @@ const ENDPOINTS = ['issuer', 'authorization_endpoint', 'token_endpoint', 'jwks_u
  * @property {string} [redirectUri]
  * @property {string} [postLogoutRedirectUri]
  * @property {string} [scope]                   Default "openid profile email offline_access" (offline_access only if supported).
+ * @property {boolean} [signals]                CAEP and RISC. Default true; omitted is on. `false` drops `ssf.read` and
+ *           `ssf.manage` from every authorization and token request. Sign-in does not fetch transmitter metadata.
  * @property {string|string[]} [resource]       RFC 8707 resource indicator(s): audience-restricts the tokens.
  * @property {string} [idTokenSignedResponseAlg] Expected ID token `alg` (default RS256).
  * @property {'auto'|'always'|'never'} [par]    Pushed Authorization Requests (RFC 9126). Default "auto": used when advertised.
@@ -84,6 +94,7 @@ export class OIDCClient extends Emitter {
     super();
     if (!config?.issuer && !config?.metadata?.issuer) throw new TypeError('issuer or metadata is required');
     if (!config.clientId) throw new TypeError('clientId is required');
+    if (config.signals !== undefined && typeof config.signals !== 'boolean') throw new TypeError('signals must be true or false');
     for (const secretOption of ['clientSecret', 'privateJwk', 'tokenEndpointAuthMethod']) {
       if (config[secretOption] !== undefined && !(secretOption === 'tokenEndpointAuthMethod' && config[secretOption] === 'none')) {
         throw new TypeError(`${secretOption} is not supported: this client is a public client (token_endpoint_auth_method "none")`);
@@ -103,6 +114,7 @@ export class OIDCClient extends Emitter {
       ...config,
       requireDpop: config.requireDpop ?? !!config.dpop,
       issuer: config.issuer ?? config.metadata.issuer,
+      signals: config.signals ?? true,
     };
     this.#config.transactionStore ??= new TransactionStore();
   }
@@ -240,6 +252,7 @@ export class OIDCClient extends Emitter {
       const offline = m.scopes_supported?.includes('offline_access') ? ' offline_access' : '';
       c.scope = `openid profile email${offline}`;
     }
+    if (c.signals === false) c.scope = scopeWithoutSignals(c.scope);
     c.transactionStore.sweep?.(c.transactionTtlSec * 1000);
     return this;
   }
@@ -253,6 +266,11 @@ export class OIDCClient extends Emitter {
     return r === undefined ? [] : [].concat(r);
   }
 
+  /** Scope placed on an authorization or token request. */
+  #scopeForRequest(scope) {
+    return this.#config.signals === false ? scopeWithoutSignals(scope) : scope;
+  }
+
   // ---------------------------------------------------------------------------
   // Authorization request
   // ---------------------------------------------------------------------------
@@ -263,7 +281,7 @@ export class OIDCClient extends Emitter {
    * Uses PAR when enabled, and binds the authorization code to the DPoP key (`dpop_jkt`).
    *
    * @param {object} [opts]
-   * @param {string} [opts.scope]
+   * @param {string} [opts.scope]  Replaces the client's scope for this request. `signals: false` still drops `ssf.read` and `ssf.manage`.
    * @param {string} [opts.redirectUri]
    * @param {string} [opts.prompt]
    * @param {number} [opts.maxAge]
@@ -298,7 +316,7 @@ export class OIDCClient extends Emitter {
       response_type: 'code',
       client_id: c.clientId,
       redirect_uri: redirectUri,
-      scope: opts.scope ?? c.scope,
+      scope: this.#scopeForRequest(opts.scope ?? c.scope),
       state,
       nonce,
       code_challenge: await codeChallengeS256(codeVerifier),
@@ -462,7 +480,8 @@ export class OIDCClient extends Emitter {
    *
    * With a bare refresh token string there are no previous claims to hold a new ID token to, so pass
    * `previousClaims` (the claims of the ID token from the original sign-in); without them a response that
-   * carries an ID token is refused.
+   * carries an ID token is refused. A scope is sent only when the caller passes one; `signals: false`
+   * removes `ssf.read` and `ssf.manage` from it.
    *
    * @param {TokenSet|string} tokenSetOrRefreshToken
    * @param {{ scope?: string, previousClaims?: object }} [opts]
@@ -473,7 +492,7 @@ export class OIDCClient extends Emitter {
     const refreshToken = previous ? previous.refresh_token : tokenSetOrRefreshToken;
     if (!refreshToken) throw new OIDCClientError('No refresh_token available', { code: 'no_refresh_token' });
     const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken });
-    if (scope) body.set('scope', scope);
+    if (scope) body.set('scope', this.#scopeForRequest(scope));
     for (const r of this.#resources()) body.append('resource', r);
 
     const tokens = await this.#tokenRequest(body);
