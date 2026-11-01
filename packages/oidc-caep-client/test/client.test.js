@@ -341,6 +341,62 @@ describe('configuration', () => {
   });
 });
 
+describe('signals', () => {
+  const scope = 'openid profile email ssf.read ssf.manage';
+  const withoutPar = () => {
+    const metadata = { ...op.metadata };
+    delete metadata.pushed_authorization_request_endpoint;
+    return metadata;
+  };
+  const scopeOf = (url) => new URL(url).searchParams.get('scope').split(' ');
+  const clientWith = (extra) => OIDCClient.fromMetadata(withoutPar(), {
+    clientId: op.clientId, redirectUri: REDIRECT, fetch: op.fetch, transactionStore: memoryStore(), ...extra,
+  });
+
+  it('drops ssf.read and ssf.manage from authorization and refresh requests when signals is false', async () => {
+    const client = await clientWith({ signals: false, scope });
+    assert.equal(client.config.signals, false);
+    const sent = scopeOf((await client.createAuthorizationRequest()).url);
+    assert.deepEqual(sent, ['openid', 'profile', 'email']);
+    const overridden = scopeOf((await client.createAuthorizationRequest({ scope: 'openid ssf.read ssf.manage address' })).url);
+    assert.ok(overridden.includes('openid'));
+    assert.ok(overridden.includes('address'));
+    assert.equal(overridden.includes('ssf.read'), false);
+    assert.equal(overridden.includes('ssf.manage'), false);
+
+    const tokens = await signIn(client);
+    await client.refresh(tokens, { scope: 'openid ssf.read ssf.manage profile' });
+    const refreshed = op.state.lastToken.get('scope').split(' ');
+    assert.ok(refreshed.includes('openid'));
+    assert.ok(refreshed.includes('profile'));
+    assert.equal(refreshed.includes('ssf.read'), false);
+    assert.equal(refreshed.includes('ssf.manage'), false);
+
+    const defaults = await clientWith({ signals: false });
+    assert.equal(defaults.config.scope, 'openid profile email offline_access');
+  });
+
+  it('keeps caller ssf scopes when signals is omitted or true', async () => {
+    const omitted = await clientWith({ scope });
+    assert.equal(omitted.config.signals, true);
+    const sent = scopeOf((await omitted.createAuthorizationRequest()).url);
+    assert.ok(sent.includes('openid'));
+    assert.ok(sent.includes('ssf.read'));
+    assert.ok(sent.includes('ssf.manage'));
+    assert.deepEqual(scopeOf((await omitted.createAuthorizationRequest({ scope: 'openid ssf.read' })).url), ['openid', 'ssf.read']);
+
+    const on = await clientWith({ signals: true, scope });
+    assert.equal(scopeOf((await on.createAuthorizationRequest()).url).join(' '), scope);
+  });
+
+  it('rejects a non-boolean signals', () => {
+    assert.throws(
+      () => new OIDCClient({ issuer: op.issuer, clientId: 'x', signals: 'no' }),
+      (e) => e instanceof TypeError && e.message === 'signals must be true or false',
+    );
+  });
+});
+
 describe('authorization request', () => {
   it('pushes the request (PAR) and sends only client_id + request_uri through the browser', async () => {
     const client = await newClient();
