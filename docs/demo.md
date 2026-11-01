@@ -16,7 +16,8 @@ Open <http://localhost:3000>. The page reads [`demo/public/oidc.json`](https://g
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PUBLIC_URL` | `http://localhost:3000` | The URL browsers use. The redirect URI is `${PUBLIC_URL}/callback`. With Compose, change it together with `HOST_PORT`. |
+| `PORT` | `3000` | The listen port and the published port. |
+| `PUBLIC_URL` | empty | Overrides the origin when the browser-facing URL is not `http://localhost:$PORT`. The redirect URI is that origin plus `/callback`. |
 
 ## Register the client on iya-sts
 
@@ -34,7 +35,7 @@ ADMIN_API_CLIENT_SECRET=… npm run register-iya-sts
 
 | Option | Use |
 |---|---|
-| `--public-url url` | The demo isn't on `http://localhost:3000`. |
+| `--public-url url` | The browser-facing URL is not `http://localhost:$PORT`. A non-empty `PUBLIC_URL` names that origin too. |
 | `--config path` | Another OIDC file. |
 | `--test-user name`, `--no-test-user` | Name the test user, or skip it. |
 
