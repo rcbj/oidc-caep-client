@@ -280,6 +280,7 @@ These are the `OIDCClient` config options:
 | `clientId` | required |
 | `redirectUri`, `postLogoutRedirectUri` | — |
 | `scope` | `openid profile email` + `offline_access` if supported |
+| `signals` | `true`. Omitted is on. `false` turns CAEP and RISC off and drops `ssf.read` and `ssf.manage` from authorization and token requests |
 | `resource` | — |
 | `idTokenSignedResponseAlg` | `RS256` |
 | `par` | `'auto'` |
@@ -293,6 +294,8 @@ These are the `OIDCClient` config options:
 | `clockToleranceSec` | 30 |
 | `httpTimeoutMs` | 10000 |
 | `fetch` | global `fetch` |
+
+`signals` defaults to on. `"signals": false` in the client configuration turns CAEP and RISC off and drops `ssf.read` and `ssf.manage` from the authorization request, and from a refresh that sends a scope, including when `scope` or the demo's `oidc.json` still lists them. Other scopes stay. Sign-in itself is unchanged: discovery reads the OpenID provider metadata only and does not fetch `/.well-known/ssf-configuration`. The demo page does not contact a transmitter when `signals` is false. The demo's existing `caep.enabled: false` still skips the receiver, and a file value `"signals": false` wins over `caep.enabled: true`.
 
 **`TokenManager(client, { store, refreshSkewSec, autoRefresh })`** (refreshes hold a lock shared by the tabs):
 

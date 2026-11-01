@@ -154,6 +154,8 @@ const client = await OIDCClient.discover({
 });
 ```
 
+`signals` defaults to on (`true`, or omitted). `signals: false` turns CAEP and RISC off and drops `ssf.read` and `ssf.manage` from the authorization request, including when `scope` still lists them. A refresh that sends a scope loses those two tokens as well. Other scopes stay. Sign-in does not fetch transmitter metadata. Omit `signals`, or leave it `true`, to keep receiving events. In the demo, `"signals": false` in `oidc.json` does the same even when that file still lists the SSF scopes, and the page does not contact a transmitter. The demo's `caep.enabled: false` still skips the receiver.
+
 If you already have the metadata document, use `OIDCClient.fromMetadata(metadata, { ... })` instead. The client checks the metadata before using it:
 
 - **PKCE:** the provider must offer `S256`, otherwise the client refuses it.
