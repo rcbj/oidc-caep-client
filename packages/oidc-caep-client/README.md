@@ -255,7 +255,7 @@ In addition, a replayed `jti` is dropped.
 - A SET is acknowledged only after its handlers ran without throwing. If one throws, the SET is left for the transmitter to send again, up to `maxDeliveryAttempts` times (default 5). After that it is acknowledged and `onError` gets `handler_failed`. Make handlers idempotent: a reload can also bring a handled SET back before its acknowledgement was sent.
 - Only a definitely invalid SET is reported as an error (bad signature, issuer, audience, `typ`, claims). One that couldn't be checked for a reason that may pass is left for redelivery for as long as that lasts, and never reported: a network error fetching the JWKS, or a key the cached JWKS doesn't hold yet.
 - Polls never overlap: `poll()` during a poll shares it, and `pollNow()` during a poll asks for another right after it. A SET whose handlers are still running is never acknowledged by another poll.
-- `stop()` sends the acknowledgements still owed.
+- `stop()` sends the acknowledgements still owed. A handler may await it on its own receiver: it then returns at once, and the poll in flight sends them when it ends.
 - The poll endpoint must use TLS and share an origin with the transmitter (`trustedPollOrigins` adds others), because every poll carries the person's access token.
 - Errors go to `onError`; without one, they are written to `console.error`, so a lost signal always leaves a trace.
 
