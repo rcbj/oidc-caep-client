@@ -33,6 +33,14 @@ npm install
 npm test
 ```
 
+### Live test against iya-sts
+
+```sh
+python3 scripts/live_iya_sts.py
+```
+
+It starts a fresh iya-sts from its `main` branch (memory mode, no persistence or clustering), registers the demo, signs in through the demo in headless Chromium (Playwright's official container image), emits a CAEP `credential-change` and then a `session-revoked`, and requires the page to show the first while still signed in and to be signed out after the second. It needs only Docker and the host's Python 3; Node and the browser run in containers. `IYA_STS_IMAGE` starts the fresh container from an image you already have, `IYA_STS_URL` uses a running iya-sts, and `LIVE_STS_PORT` / `LIVE_DEMO_PORT` (default 18504 and 18604) choose the ports. The `Nightly` workflow runs the unit suite and this test every day at 06:15 UTC.
+
 Branch from `develop`. See [Development and releases](https://rcbj.github.io/oidc-caep-client/development.html) for CI, branches and versioning.
 
 ## License

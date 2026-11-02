@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
+# SPDX-License-Identifier: MIT
+#
+# The whole suite once a day: the library's unit tests, the declaration check and the manifest
+# check in the Node image, then the live test, which builds iya-sts's main branch, starts it in
+# memory mode, registers the demo SPA, signs in through the SPA in headless Chromium (Playwright's
+# official image) and confirms the page received a CAEP credential-change and a session-revoked.
+name: Nightly
+
+on:
+  schedule:
+    # 06:15 UTC. The authentication client libraries share one two-hour window.
+    - cron: '15 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unit suite
+        run: |
+          docker run --rm -v "$PWD":/src:ro node:24.22.1-bookworm-slim sh -ec '
+            mkdir /app && cd /src
+            tar --exclude=./node_modules --exclude=./.git -cf - . | tar -xf - -C /app
+            cd /app
+            npm ci --no-audit --no-fund
+            npm test
+            npm run test:types
+            node scripts/version.mjs --check-manifests'
+      - name: Live iya-sts
+        run: python3 scripts/live_iya_sts.py
