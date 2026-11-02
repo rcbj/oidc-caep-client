@@ -547,10 +547,20 @@ function handle(key, policy) {
 function handlersFor(key, getTokenSet) {
   const s = () => stateOf(key);
   const on = (policy) => handle(key, policy);
-  const end = (reason) => accounts.end(key, reason);
+  // Ending an account stops its stream, and SSFReceiver.stop() waits for the poll in flight, which is the
+  // one running this handler. Awaiting the end here would wait for itself, and the account would never end.
+  // So the end starts once the handler has returned.
+  const end = (reason) => {
+    setTimeout(() => {
+      accounts.end(key, reason).catch((err) => {
+        ui.error = `Could not end ${labelOf(accounts.get(key))}: ${describe(err)}`;
+        render();
+      });
+    }, 0);
+  };
   return {
     sessionRevoked: on(async (evt) => {
-      await end(evt.reasonUser?.en ?? 'The session was revoked by the identity provider.');
+      end(evt.reasonUser?.en ?? 'The session was revoked by the identity provider.');
       return 'Session ended; its cached tokens discarded. Other accounts are unaffected.';
     }),
     tokenClaimsChange: on(async (evt) => {
@@ -560,7 +570,7 @@ function handlersFor(key, getTokenSet) {
     credentialChange: on(async (evt) => {
       const { credential_type: type = 'credential', change_type: change } = evt.payload;
       if (['revoke', 'delete'].includes(change)) {
-        await end(`The ${type} was ${change}d; sign in again.`);
+        end(`The ${type} was ${change}d; sign in again.`);
         return `Credential ${change}d: session ended.`;
       }
       s().notices.unshift({ level: 'info', text: `The ${type} was ${change ? `${change}d` : 'changed'} at the identity provider.` });
@@ -573,7 +583,7 @@ function handlersFor(key, getTokenSet) {
     }),
     deviceComplianceChange: on(async (evt) => {
       if (evt.payload.current_status === 'not-compliant') {
-        await end('The device is no longer compliant with security policy.');
+        end('The device is no longer compliant with security policy.');
         return 'Device not compliant: session ended.';
       }
       return 'Device compliant: no action.';
@@ -581,7 +591,7 @@ function handlersFor(key, getTokenSet) {
     riskLevelChange: on(async (evt) => {
       const { current_level: level, risk_reason: why } = evt.payload;
       if (level === 'HIGH') {
-        await end(`High risk detected (${why ?? 'no reason given'}).`);
+        end(`High risk detected (${why ?? 'no reason given'}).`);
         return 'Risk HIGH: session ended.';
       }
       s().stepUp = level === 'MEDIUM' ? `Risk raised to MEDIUM (${why ?? 'no reason given'}).` : undefined;
@@ -873,6 +883,33 @@ function renderLog(freshAt) {
   $('log-empty').textContent = cur
     ? `No CAEP events for ${labelOf(accounts.active)} yet. Trigger one at your identity provider (for example, revoke your session).`
     : 'No CAEP events yet. Sign in, then trigger an event at your identity provider (for example, revoke your session).';
+  renderLiveStatus();
+}
+
+/** The account #live-status reports: this tab's active one, or the last one it had. */
+let liveKey;
+
+/**
+ * What a test driving this page in a browser reads (scripts/live_iya_sts.py): whether this tab's active
+ * account is signed in, the subject of the account it has (or last had) active, this tab's receiver
+ * state, and the type URI and jti of each signal it received for that account. Never a token, an
+ * assertion or a payload. An ended account stops being active, and what a test asks is what happened to
+ * it, so the last active account is reported until another becomes active.
+ */
+function renderLiveStatus() {
+  if (accounts?.activeKey) liveKey = accounts.activeKey;
+  const key = liveKey;
+  const active = key ? accounts?.get(key) : undefined;
+  const events = key
+    ? eventLog().filter((e) => e.account === key && e.type && e.jti).reverse().map((e) => ({ type: e.type, jti: e.jti }))
+    : [];
+  $('live-status').textContent = JSON.stringify({
+    signedIn: !!signedIn(),
+    subject: active?.sub ?? null,
+    receiver: String(caep.state?.status ?? 'none'),
+    receiverError: caep.state?.error ?? null,
+    events,
+  });
 }
 
 function logEntry(entry, fresh) {
