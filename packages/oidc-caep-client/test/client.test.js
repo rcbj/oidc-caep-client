@@ -1224,7 +1224,11 @@ describe('SSF / CAEP receiver (poll)', () => {
     await assert.rejects(r.poll(), (e) => e.code === 'untrusted_endpoint');
     r.stream.delivery.endpoint_url = `${op.issuer.replace('https:', 'http:')}/ssf/poll/x`;
     await assert.rejects(r.poll(), (e) => e.code === 'insecure_endpoint');
-    assert.ok(!seen.some((u) => u.startsWith('https://evil.example') || u.startsWith('http:')));
+    // Parsed, not a prefix: a prefix check passes https://evil.example.com and https://evil.example@op.test.
+    assert.ok(!seen.some((u) => {
+      const url = new URL(u);
+      return url.hostname === 'evil.example' || url.protocol !== 'https:';
+    }));
     await r.stop();
 
     const httpJwks = async (input, init) => {
