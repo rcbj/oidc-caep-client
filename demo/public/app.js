@@ -547,20 +547,18 @@ function handle(key, policy) {
 function handlersFor(key, getTokenSet) {
   const s = () => stateOf(key);
   const on = (policy) => handle(key, policy);
-  // Ending an account stops its stream, and SSFReceiver.stop() waits for the poll in flight, which is the
-  // one running this handler. Awaiting the end here would wait for itself, and the account would never end.
-  // So the end starts once the handler has returned.
-  const end = (reason) => {
-    setTimeout(() => {
-      accounts.end(key, reason).catch((err) => {
-        ui.error = `Could not end ${labelOf(accounts.get(key))}: ${describe(err)}`;
-        render();
-      });
-    }, 0);
+  // Ending an account stops its stream from inside this handler; SSFReceiver.stop() then returns at once
+  // and the poll sends this SET's acknowledgement when it ends. A failure to end is shown, not thrown: the
+  // event was handled, and throwing would have the transmitter send it again.
+  const end = async (reason) => {
+    await accounts.end(key, reason).catch((err) => {
+      ui.error = `Could not end ${labelOf(accounts.get(key))}: ${describe(err)}`;
+      render();
+    });
   };
   return {
     sessionRevoked: on(async (evt) => {
-      end(evt.reasonUser?.en ?? 'The session was revoked by the identity provider.');
+      await end(evt.reasonUser?.en ?? 'The session was revoked by the identity provider.');
       return 'Session ended; its cached tokens discarded. Other accounts are unaffected.';
     }),
     tokenClaimsChange: on(async (evt) => {
@@ -570,7 +568,7 @@ function handlersFor(key, getTokenSet) {
     credentialChange: on(async (evt) => {
       const { credential_type: type = 'credential', change_type: change } = evt.payload;
       if (['revoke', 'delete'].includes(change)) {
-        end(`The ${type} was ${change}d; sign in again.`);
+        await end(`The ${type} was ${change}d; sign in again.`);
         return `Credential ${change}d: session ended.`;
       }
       s().notices.unshift({ level: 'info', text: `The ${type} was ${change ? `${change}d` : 'changed'} at the identity provider.` });
@@ -583,7 +581,7 @@ function handlersFor(key, getTokenSet) {
     }),
     deviceComplianceChange: on(async (evt) => {
       if (evt.payload.current_status === 'not-compliant') {
-        end('The device is no longer compliant with security policy.');
+        await end('The device is no longer compliant with security policy.');
         return 'Device not compliant: session ended.';
       }
       return 'Device compliant: no action.';
@@ -591,7 +589,7 @@ function handlersFor(key, getTokenSet) {
     riskLevelChange: on(async (evt) => {
       const { current_level: level, risk_reason: why } = evt.payload;
       if (level === 'HIGH') {
-        end(`High risk detected (${why ?? 'no reason given'}).`);
+        await end(`High risk detected (${why ?? 'no reason given'}).`);
         return 'Risk HIGH: session ended.';
       }
       s().stepUp = level === 'MEDIUM' ? `Risk raised to MEDIUM (${why ?? 'no reason given'}).` : undefined;

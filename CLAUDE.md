@@ -14,7 +14,7 @@ Node.js 24.22.1 or later. That is the engines field, `.nvmrc`, and the only vers
 |---|---|
 | `packages/oidc-caep-client` | The library published to npm as `oidc-caep-client`, version line 0.2. Source is `src/*.js` (`oidc-client.js`, `dpop.js`, `pkce.js`, `token-manager.js`, `accounts.js`, `caep/`). Tests are `test/`. The package is published from the source. `npm run build:types` writes declarations under `types/`, which is not committed. |
 | `demo` | The static demo. `demo/server.js` serves `demo/public/` (`app.js`, `oidc.json`). |
-| `scripts` | `register-iya-sts-client.mjs` registers the public client on iya-sts. `version.mjs` stamps the published version. |
+| `scripts` | `register-iya-sts-client.mjs` registers the public client on iya-sts; it verifies every call against `--ca` (the live driver passes the root it checked), or against the root taken on first use, and writes a generated test-user password to `demo/generated/<user>.password` (0600) rather than printing it. `version.mjs` stamps the published version. |
 | `docs` | The GitHub Pages site. |
 | `tools/apidocs` | TypeDoc and JSDoc. It is outside the npm workspace because TypeDoc runs on a different TypeScript than the declaration build. |
 | `Dockerfile`, `docker-compose.yml` | The demo image. Compose publishes `PORT` to the same host port. |
@@ -64,7 +64,7 @@ npm run version:check
 
 `#live-status` is a hidden element `app.js` redraws with every log render: `signedIn`, the active account's `subject`, the receiver state (`connected` while polling) and its last poll error, and each received event's `type` URI and `jti`. Never a token or a payload. It reports the last account the tab had active, because an ended account stops being active.
 
-The demo's signal handlers start `accounts.end()` on a timer instead of awaiting it. Ending an account stops its stream, and `SSFReceiver.stop()` waits for the poll in flight, which is the one running the handler: awaited, the end waited for itself, the SET was never logged or acknowledged, polling stopped, and the account stayed signed in. The live test found it.
+The demo's signal handlers await `accounts.end()`. Ending an account stops its stream from inside the handler; until #55 `SSFReceiver.stop()` waited for the poll in flight, which was the one running the handler, so the demo had to start the end on a timer. Now `stop()` called while a polled SET's handlers run returns at once and leaves the acknowledgements (and `deleteStream`) to the end of the poll.
 
 TLS: the host script takes the one self-signed certificate from the chain `GET /tls/server-certificate` serves (`CN = sts Root CA`), verifies iya-sts against it, and mounts it into the browser container, which adds it to Chromium's NSS database (`certutil`, trust `C,,`). The browser is never told to ignore certificate errors. Container names: `iya-sts-live-oidc-caep-client`, `oidc-caep-client-live-demo`, `oidc-caep-client-live-browser`; images `oidc-caep-client-live:demo` and `oidc-caep-client-live:browser`. Never bind 3000, 8081 or 18481 to 18495.
 

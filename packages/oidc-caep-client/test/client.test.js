@@ -1128,6 +1128,25 @@ describe('SSF / CAEP receiver (poll)', () => {
     await r.stop();
   });
 
+  it('a handler may await stop() on its own receiver: no deadlock, its SET acknowledged, then the stream deleted', async () => {
+    const r = await receiver({ pollIntervalMs: 60_000 });
+    r.onError(() => {});
+    let stopped = false;
+    r.onSessionRevoked(async () => {
+      await r.stop({ deleteStream: true });
+      stopped = true;
+    });
+    await r.start();
+    await settle();
+    const s = stream(r);
+    s.queue.set('j1', await op.makeSet(s, CAEP.SESSION_REVOKED, {}, alice()));
+    const polled = r.poll();
+    await waitFor(() => stopped, 'stop() to resolve inside the handler');
+    await polled;
+    await waitFor(() => s.queue.size === 0, 'the acknowledgement sent once the poll ended');
+    await waitFor(() => !op.state.streams.has(s.stream_id), 'the stream deleted after the acknowledgement');
+  });
+
   it('leaves a SET for redelivery when its signing keys cannot be fetched, instead of reporting it invalid', async () => {
     let failJwks = 1;
     const fetch = (input, init) => {
@@ -1224,7 +1243,11 @@ describe('SSF / CAEP receiver (poll)', () => {
     await assert.rejects(r.poll(), (e) => e.code === 'untrusted_endpoint');
     r.stream.delivery.endpoint_url = `${op.issuer.replace('https:', 'http:')}/ssf/poll/x`;
     await assert.rejects(r.poll(), (e) => e.code === 'insecure_endpoint');
-    assert.ok(!seen.some((u) => u.startsWith('https://evil.example') || u.startsWith('http:')));
+    // Parsed, not a prefix: a prefix check passes https://evil.example.com and https://evil.example@op.test.
+    assert.ok(!seen.some((u) => {
+      const url = new URL(u);
+      return url.hostname === 'evil.example' || url.protocol !== 'https:';
+    }));
     await r.stop();
 
     const httpJwks = async (input, init) => {

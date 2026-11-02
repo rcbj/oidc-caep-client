@@ -69,7 +69,7 @@ PROFILE = {
     "repo": "oidc-caep-client",
     "client_id": "oidc-caep-demo",
     "scopes": "openid profile email offline_access ssf.read ssf.manage",
-    "password_env": "CAEP_DEMO_USER_PASSWORD",
+    "test_user_env": "CAEP_DEMO_USER_PASSWORD",
     "test_user": "caep-demo-user",
 }
 
@@ -287,14 +287,20 @@ def write_oidc_file(path, sts_origin):
 
 
 def register(work, demo_origin, demo_port):
-    """The registration script, in the Node image. Secrets go through the environment, not argv."""
-    completed = run(
+    """The registration script, in the Node image. Secrets go through the environment, not argv.
+    It verifies iya-sts against the root this driver already checked (--ca)."""
+    # The command is not echoed: it names the variable that carries the test user's password, and
+    # nothing derived from a password may reach a log line (CodeQL
+    # py/clear-text-logging-sensitive-data). A fixed label stands in for it.
+    print("+ docker run " + NODE_IMAGE + " node scripts/register-iya-sts-client.mjs", flush=True)
+    completed = subprocess.run(
         [
             "docker", "run", "--rm", "--network", "host",
             "-v", f"{ROOT / 'scripts'}:/app/scripts:ro",
             "-v", f"{work / 'oidc.json'}:/app/oidc.json:ro",
+            "-v", f"{work / 'root.pem'}:/app/root.pem:ro",
             "-e", "ADMIN_API_CLIENT_SECRET",
-            "-e", PROFILE["password_env"],
+            "-e", PROFILE["test_user_env"],
             "-e", f"PORT={demo_port}",
             "-w", "/app",
             NODE_IMAGE,
@@ -302,12 +308,17 @@ def register(work, demo_origin, demo_port):
             "--config", "/app/oidc.json",
             "--public-url", demo_origin,
             "--test-user", PROFILE["test_user"],
+            "--ca", "/app/root.pem",
         ],
+        check=False,
+        text=True,
         capture_output=True,
     )
     print(completed.stdout, flush=True)
     if completed.stderr:
         print(completed.stderr, file=sys.stderr, flush=True)
+    if completed.returncode != 0:
+        raise RuntimeError(f"the registration script exited {completed.returncode}")
 
 
 def start_demo(work, image, name, demo_port, demo_origin):
@@ -351,8 +362,9 @@ class Browser:
             "-e", "LIVE_PASSWORD",
             BROWSER_IMAGE,
         ]
-        print("+ " + " ".join(command), flush=True)
-        env = {**os.environ, "LIVE_PASSWORD": os.environ[PROFILE["password_env"]]}
+        # A fixed label, not the command: it names the variable that carries the password.
+        print("+ docker run " + BROWSER_IMAGE + " (scripts/live_browser.py)", flush=True)
+        env = {**os.environ, "LIVE_PASSWORD": os.environ[PROFILE["test_user_env"]]}
         self.process = subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env, bufsize=1
         )
@@ -400,10 +412,10 @@ def main():
     if any(port in FORBIDDEN_PORTS for port in bound) or len(set(bound)) != len(bound):
         raise SystemExit("LIVE_STS_PORT and LIVE_DEMO_PORT must differ and must not bind 3000, 8081, or 18481 to 18495")
     secret = os.environ.get("ADMIN_API_CLIENT_SECRET") or os.environ.get("STS_ADMIN_API_CLIENT_SECRET") or secrets.token_urlsafe(24)
-    password = os.environ.get(PROFILE["password_env"]) or secrets.token_urlsafe(18)
+    password = os.environ.get(PROFILE["test_user_env"]) or secrets.token_urlsafe(18)
     # Secrets reach docker as -e NAME from this environment, never on a printed command line.
     os.environ["ADMIN_API_CLIENT_SECRET"] = secret
-    os.environ[PROFILE["password_env"]] = password
+    os.environ[PROFILE["test_user_env"]] = password
     sts_origin, sts_name = prepare_sts(sts_port, secret)
     # The SPA's redirect URI is location.origin + /callback, so this is exactly what is registered.
     demo_origin = f"http://127.0.0.1:{demo_port}"
