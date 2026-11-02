@@ -50,9 +50,8 @@ import { execFileSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
 import { closeSync, fchmodSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import https from 'node:https';
-import { isIP } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
-import { checkServerIdentity, connect } from 'node:tls';
+import { checkServerIdentity } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -188,11 +187,6 @@ function readOidcFile(path) {
 const BLOCK = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
 const TIMEOUT_MS = 10_000;
 
-/** SNI is a hostname. An IP address literal is not one, and Node refuses it. */
-function servernameOf(hostname) {
-  return isIP(hostname) ? undefined : hostname;
-}
-
 /**
  * What a first use can still check without an anchor: the leaf names the host, and every
  * certificate is signed by the next one up. Returns the self-signed root at the top.
@@ -213,22 +207,30 @@ export function rootOnFirstUse(hostname, certs) {
   return top;
 }
 
-// The chain the handshake presents, leaf first. Unverified: this is how the anchor is learned, and
-// rootOnFirstUse() checks it before anything is sent. Nothing but the handshake happens here.
+// The chain the handshake presents, leaf first, from a GET of /tls/server-certificate that carries
+// no credential. Unverified: this is how the anchor is learned, and rootOnFirstUse() checks the chain
+// before anything else is sent. Every later call is verified against the root it yields.
 function presentedChain(base) {
-  const target = new URL(base);
   return new Promise((resolvePromise, reject) => {
-    const servername = servernameOf(target.hostname);
-    const socket = connect({
-      host: target.hostname,
-      port: Number(target.port || 443),
-      ...(servername ? { servername } : {}),
-      rejectUnauthorized: false,
+    const u = new URL('/tls/server-certificate', base);
+    const certs = [];
+    const req = https.request({
+      hostname: u.hostname,
+      port: u.port,
+      path: `${u.pathname}${u.search}`,
+      method: 'GET',
+      agent: false,
       minVersion: 'TLSv1.2',
-    }, () => {
-      const certs = [];
+      timeout: TIMEOUT_MS,
+      rejectUnauthorized: false,
+    }, (res) => {
+      let text = '';
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => resolvePromise({ status: res.statusCode, text, certs }));
+    });
+    req.once('response', (res) => {
       const seen = new Set();
-      let current = socket.getPeerCertificate(true);
+      let current = res.socket.getPeerCertificate(true);
       while (current?.raw && current.fingerprint256 && !seen.has(current.fingerprint256)) {
         seen.add(current.fingerprint256);
         certs.push(new X509Certificate(current.raw));
@@ -236,14 +238,10 @@ function presentedChain(base) {
         if (!next || next === current || !next.raw) break;
         current = next;
       }
-      socket.end();
-      resolvePromise(certs);
     });
-    socket.setTimeout(TIMEOUT_MS, () => {
-      socket.destroy();
-      reject(new Error(`${base} did not complete a TLS handshake`));
-    });
-    socket.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error(`${base} did not answer within ${TIMEOUT_MS / 1000} s`)));
+    req.on('error', reject);
+    req.end();
   });
 }
 
@@ -254,7 +252,7 @@ export async function trustAnchor(base, caFile) {
     if (!(pem.match(BLOCK) ?? []).length) throw new Error(`${caFile} holds no PEM certificate`);
     return { pem, firstUse: false };
   }
-  const root = rootOnFirstUse(new URL(base).hostname, await presentedChain(base));
+  const root = rootOnFirstUse(new URL(base).hostname, (await presentedChain(base)).certs);
   return { pem: `${root.toString().trim()}\n`, firstUse: true, root };
 }
 
