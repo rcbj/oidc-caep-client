@@ -40,10 +40,11 @@
  *
  * TLS: every call is verified. With --ca (or IYA_STS_CA), against that PEM
  * file. Without one, the script first learns the anchor on first use: it
- * reads the chain the handshake presents, unverified, requires the leaf to
- * name the host and every certificate to be signed by the next, takes the
- * self-signed root, prints its SHA-256 to compare with iya-sts's PKI page, and
- * verifies every management call against it.
+ * reads the chain iya-sts publishes at GET /tls/server-certificate, with no
+ * credential and unverified, requires the leaf to name the host and every
+ * certificate to be signed by the next, takes the self-signed root, prints its
+ * SHA-256 to compare with iya-sts's PKI page, and verifies every management
+ * call against it.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -78,7 +79,7 @@ function usage() {
                  or one is generated and written to demo/generated/<user>.password.
   --no-test-user Do not create or change a test user.
   --ca           PEM file to verify iya-sts against (default: $IYA_STS_CA). Without
-                 one, the root iya-sts presents is taken on first use and its
+                 one, the root of the chain iya-sts publishes is taken on first use and its
                  SHA-256 printed.
 
 The management API secret is STS_ADMIN_API_CLIENT_SECRET or ADMIN_API_CLIENT_SECRET.`;
@@ -185,64 +186,26 @@ function readOidcFile(path) {
 }
 
 const BLOCK = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
-const TIMEOUT_MS = 10_000;
 
 /**
- * What a first use can still check without an anchor: the leaf names the host, and every
- * certificate is signed by the next one up. Returns the self-signed root at the top.
+ * What a first use can still check without an anchor: the published chain starts with a leaf that
+ * names the host, every certificate is signed by the next one up, and the top one is a self-signed
+ * root, which is returned.
  */
 export function rootOnFirstUse(hostname, certs) {
-  if (!certs.length) throw new Error('the handshake presented no certificate');
+  if (!certs.length) throw new Error('the published trust chain holds no certificate');
   const mismatch = checkServerIdentity(hostname, certs[0].toLegacyObject());
   if (mismatch) throw mismatch;
   for (let i = 0; i + 1 < certs.length; i += 1) {
     if (!certs[i].checkIssued(certs[i + 1]) || !certs[i].verify(certs[i + 1].publicKey)) {
-      throw new Error(`certificate ${i + 1} of the presented chain is not signed by certificate ${i + 2}`);
+      throw new Error(`certificate ${i + 1} of the published chain is not signed by certificate ${i + 2}`);
     }
   }
   const top = certs[certs.length - 1];
   if (top.subject !== top.issuer || !top.verify(top.publicKey)) {
-    throw new Error('the presented chain does not end in a self-signed root; pass --ca with the iya-sts Root CA');
+    throw new Error('the published chain does not end in a self-signed root; pass --ca with the iya-sts Root CA');
   }
   return top;
-}
-
-// The chain the handshake presents, leaf first, from a GET of /tls/server-certificate that carries
-// no credential. Unverified: this is how the anchor is learned, and rootOnFirstUse() checks the chain
-// before anything else is sent. Every later call is verified against the root it yields.
-function presentedChain(base) {
-  return new Promise((resolvePromise, reject) => {
-    const u = new URL('/tls/server-certificate', base);
-    const certs = [];
-    const req = https.request({
-      hostname: u.hostname,
-      port: u.port,
-      path: `${u.pathname}${u.search}`,
-      method: 'GET',
-      agent: false,
-      minVersion: 'TLSv1.2',
-      timeout: TIMEOUT_MS,
-      rejectUnauthorized: false,
-    }, (res) => {
-      let text = '';
-      res.on('data', (chunk) => { text += chunk; });
-      res.on('end', () => resolvePromise({ status: res.statusCode, text, certs }));
-    });
-    req.once('response', (res) => {
-      const seen = new Set();
-      let current = res.socket.getPeerCertificate(true);
-      while (current?.raw && current.fingerprint256 && !seen.has(current.fingerprint256)) {
-        seen.add(current.fingerprint256);
-        certs.push(new X509Certificate(current.raw));
-        const next = current.issuerCertificate;
-        if (!next || next === current || !next.raw) break;
-        current = next;
-      }
-    });
-    req.on('timeout', () => req.destroy(new Error(`${base} did not answer within ${TIMEOUT_MS / 1000} s`)));
-    req.on('error', reject);
-    req.end();
-  });
 }
 
 /** The PEM every management call is verified against: --ca's file, or the root taken on first use. */
@@ -252,13 +215,41 @@ export async function trustAnchor(base, caFile) {
     if (!(pem.match(BLOCK) ?? []).length) throw new Error(`${caFile} holds no PEM certificate`);
     return { pem, firstUse: false };
   }
-  const root = rootOnFirstUse(new URL(base).hostname, (await presentedChain(base)).certs);
+  const published = new URL('/tls/server-certificate', base).href;
+  const reply = await firstUseRequest(published);
+  if (reply.status !== 200) throw new Error(`${published} answered ${reply.status}; pass --ca with the iya-sts Root CA`);
+  const certs = (reply.text.match(BLOCK) ?? []).map((block) => new X509Certificate(block));
+  const root = rootOnFirstUse(new URL(base).hostname, certs);
   return { pem: `${root.toString().trim()}\n`, firstUse: true, root };
 }
 
 let trustedCa = '';
 
-function request(url, { method = 'GET', headers = {}, body } = {}) {
+function firstUseRequest(url, { method = 'GET', headers = {}, body } = {}) {
+  return new Promise((resolvePromise, reject) => {
+    const u = new URL(url);
+    const payload = body === undefined ? null : Buffer.from(body);
+    const req = https.request({
+      hostname: u.hostname,
+      port: u.port,
+      path: `${u.pathname}${u.search}`,
+      method,
+      headers: payload ? { ...headers, 'content-length': payload.length } : headers,
+      // Unverified: only the first-use GET of /tls/server-certificate, which carries no
+      // credential, comes here. Every management call is verifiedRequest().
+      rejectUnauthorized: false,
+    }, (res) => {
+      let text = '';
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => resolvePromise({ status: res.statusCode, text }));
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function verifiedRequest(url, { method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolvePromise, reject) => {
     const u = new URL(url);
     const payload = body === undefined ? null : Buffer.from(body);
@@ -284,7 +275,7 @@ function request(url, { method = 'GET', headers = {}, body } = {}) {
 }
 
 async function jsonRequest(url, options) {
-  const reply = await request(url, options);
+  const reply = await verifiedRequest(url, options);
   let body;
   try {
     body = reply.text ? JSON.parse(reply.text) : {};
@@ -297,7 +288,7 @@ async function jsonRequest(url, options) {
 async function mintAdminToken(base, secret) {
   const audience = `${base}/admin-api`;
   const form = `grant_type=client_credentials&scope=${encodeURIComponent('admin:read admin:write')}&resource=${encodeURIComponent(audience)}`;
-  const reply = await request(`${base}/oauth2/token`, {
+  const reply = await verifiedRequest(`${base}/oauth2/token`, {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
