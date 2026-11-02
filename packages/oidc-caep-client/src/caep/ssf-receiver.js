@@ -153,6 +153,8 @@ export class SSFReceiver {
   #polling = false;
   /** The poll request in flight, if any: polls never overlap (see poll()). */
   #pollInFlight;
+  /** How many polled SETs' handlers are running now: stop() must not wait for their poll (see stop()). */
+  #pollHandlers = 0;
   /** pollNow() was called while a poll was in flight: poll again as soon as it finishes. */
   #pollAgain = false;
   /** The jtis whose handlers are running now; a redelivery of one of them is left alone. */
@@ -391,18 +393,33 @@ export class SSFReceiver {
 
   /**
    * Stops polling and optionally deletes the stream at the transmitter.
+   *
+   * Resolves once the acknowledgements still owed are sent (and the stream deleted). Called while a polled
+   * SET's handlers are running — from a handler itself, typically on session-revoked — it stops polling and
+   * resolves at once instead: the poll in flight finishes its SETs, then sends the acknowledgements and
+   * deletes the stream, with failures going to `onError` as `phase: 'stop'`.
    * @param {{ deleteStream?: boolean }} [opts]
    */
   async stop({ deleteStream = false } = {}) {
     this.#unwatchPageHide();
     this.#polling = false;
     clearTimeout(this.#pollTimer);
-    // A poll still running may finish handling SETs; their acknowledgements go in the flush below.
-    await this.#pollInFlight?.catch(() => {});
-    await this.#flushAcks();
-    if (deleteStream && this.stream?.stream_id) {
-      await this.deleteStream().catch((err) => this.#emitError(err, { phase: 'stop' }));
+    const finish = async () => {
+      // A poll still running may finish handling SETs; their acknowledgements go in the flush below.
+      await this.#pollInFlight?.catch(() => {});
+      await this.#flushAcks();
+      if (deleteStream && this.stream?.stream_id) {
+        await this.deleteStream().catch((err) => this.#emitError(err, { phase: 'stop' }));
+      }
+    };
+    // The poll in flight is waiting for the handler that is running, so a handler awaiting stop() would
+    // wait for itself: a deadlock. The browser has no way to ask whether THIS call comes from that
+    // handler, so any call made while one runs leaves the rest to the end of the poll.
+    if (this.#pollHandlers > 0) {
+      finish().catch((err) => this.#emitError(err, { phase: 'stop' }));
+      return;
     }
+    await finish();
   }
 
   // ---------------------------------------------------------------------------
@@ -689,7 +706,13 @@ export class SSFReceiver {
       this.#emitError(err, { phase: 'poll', jti });
       return;
     }
-    const handled = await this.#dispatchAll(events);
+    let handled;
+    this.#pollHandlers += 1;
+    try {
+      handled = await this.#dispatchAll(events);
+    } finally {
+      this.#pollHandlers -= 1;
+    }
     if (!handled && this.#attempt(jti) < this.#cfg.maxDeliveryAttempts) {
       // Let the redelivery through the replay check: it is the same SET, not handled yet.
       for (const evt of events) this.#seenJtis.delete(evt.jti);
