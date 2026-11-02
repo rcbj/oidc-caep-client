@@ -34,14 +34,25 @@
  *     ssf.read and ssf.manage the configuration file's scopes name;
  *   - creates a test user (default caep-demo-user) when it is absent, and
  *     adds it to the groups ssf-read and ssf-manage. Its password is
- *     CAEP_DEMO_USER_PASSWORD, or one is generated and printed once. An
+ *     CAEP_DEMO_USER_PASSWORD, or iya-sts generates one, which is written to
+ *     demo/generated/<user>.password (mode 0600) and never printed. An
  *     existing user keeps its password.
+ *
+ * TLS: every call is verified. With --ca (or IYA_STS_CA), against that PEM
+ * file. Without one, the script first learns the anchor on first use: it
+ * reads the chain the handshake presents, unverified, requires the leaf to
+ * name the host and every certificate to be signed by the next, takes the
+ * self-signed root, prints its SHA-256 to compare with iya-sts's PKI page, and
+ * verifies every management call against it.
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { X509Certificate } from 'node:crypto';
+import { closeSync, fchmodSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import https from 'node:https';
-import { dirname, resolve } from 'node:path';
+import { isIP } from 'node:net';
+import { dirname, join, resolve } from 'node:path';
+import { checkServerIdentity, connect } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -55,6 +66,7 @@ const SSF_ROLES = [
 function usage() {
   return `Usage: node scripts/register-iya-sts-client.mjs [--config path] [--public-url url]
                                                 [--test-user name | --no-test-user]
+                                                [--ca file]
 
   --config       OIDC file with metadataUrl, client_id, and scopes
                  (default: demo/public/oidc.json)
@@ -64,8 +76,11 @@ function usage() {
                  running demo's PORT, then $PORT, or 3000.
   --test-user    The test user to create and add to ssf-read and ssf-manage
                  (default: caep-demo-user). Its password is $CAEP_DEMO_USER_PASSWORD,
-                 or one is generated and printed once.
+                 or one is generated and written to demo/generated/<user>.password.
   --no-test-user Do not create or change a test user.
+  --ca           PEM file to verify iya-sts against (default: $IYA_STS_CA). Without
+                 one, the root iya-sts presents is taken on first use and its
+                 SHA-256 printed.
 
 The management API secret is STS_ADMIN_API_CLIENT_SECRET or ADMIN_API_CLIENT_SECRET.`;
 }
@@ -77,6 +92,7 @@ export function parseArgs(argv, env = process.env) {
     // Set only for --public-url, or for a non-empty PUBLIC_URL. The default origin does not count.
     publicUrlGiven: Boolean(env.PUBLIC_URL),
     testUser: 'caep-demo-user',
+    ca: env.IYA_STS_CA ? resolve(env.IYA_STS_CA) : '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -91,6 +107,11 @@ export function parseArgs(argv, env = process.env) {
     }
     else if (arg === '--test-user') out.testUser = String(argv[++i] ?? '').trim();
     else if (arg === '--no-test-user') out.testUser = '';
+    else if (arg === '--ca') {
+      const value = String(argv[++i] ?? '');
+      if (!value) throw new Error('--ca needs a file');
+      out.ca = resolve(value);
+    }
     else throw new Error(`Unknown argument ${arg}\n${usage()}`);
   }
   if (!out.publicUrl) throw new Error('--public-url is empty');
@@ -164,6 +185,81 @@ function readOidcFile(path) {
   return { metadataUrl: metadata.href, clientId, scopes, base: metadata.origin };
 }
 
+const BLOCK = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+const TIMEOUT_MS = 10_000;
+
+/** SNI is a hostname. An IP address literal is not one, and Node refuses it. */
+function servernameOf(hostname) {
+  return isIP(hostname) ? undefined : hostname;
+}
+
+/**
+ * What a first use can still check without an anchor: the leaf names the host, and every
+ * certificate is signed by the next one up. Returns the self-signed root at the top.
+ */
+export function rootOnFirstUse(hostname, certs) {
+  if (!certs.length) throw new Error('the handshake presented no certificate');
+  const mismatch = checkServerIdentity(hostname, certs[0].toLegacyObject());
+  if (mismatch) throw mismatch;
+  for (let i = 0; i + 1 < certs.length; i += 1) {
+    if (!certs[i].checkIssued(certs[i + 1]) || !certs[i].verify(certs[i + 1].publicKey)) {
+      throw new Error(`certificate ${i + 1} of the presented chain is not signed by certificate ${i + 2}`);
+    }
+  }
+  const top = certs[certs.length - 1];
+  if (top.subject !== top.issuer || !top.verify(top.publicKey)) {
+    throw new Error('the presented chain does not end in a self-signed root; pass --ca with the iya-sts Root CA');
+  }
+  return top;
+}
+
+// The chain the handshake presents, leaf first. Unverified: this is how the anchor is learned, and
+// rootOnFirstUse() checks it before anything is sent. Nothing but the handshake happens here.
+function presentedChain(base) {
+  const target = new URL(base);
+  return new Promise((resolvePromise, reject) => {
+    const servername = servernameOf(target.hostname);
+    const socket = connect({
+      host: target.hostname,
+      port: Number(target.port || 443),
+      ...(servername ? { servername } : {}),
+      rejectUnauthorized: false,
+      minVersion: 'TLSv1.2',
+    }, () => {
+      const certs = [];
+      const seen = new Set();
+      let current = socket.getPeerCertificate(true);
+      while (current?.raw && current.fingerprint256 && !seen.has(current.fingerprint256)) {
+        seen.add(current.fingerprint256);
+        certs.push(new X509Certificate(current.raw));
+        const next = current.issuerCertificate;
+        if (!next || next === current || !next.raw) break;
+        current = next;
+      }
+      socket.end();
+      resolvePromise(certs);
+    });
+    socket.setTimeout(TIMEOUT_MS, () => {
+      socket.destroy();
+      reject(new Error(`${base} did not complete a TLS handshake`));
+    });
+    socket.on('error', reject);
+  });
+}
+
+/** The PEM every management call is verified against: --ca's file, or the root taken on first use. */
+export async function trustAnchor(base, caFile) {
+  if (caFile) {
+    const pem = readFileSync(caFile, 'utf8');
+    if (!(pem.match(BLOCK) ?? []).length) throw new Error(`${caFile} holds no PEM certificate`);
+    return { pem, firstUse: false };
+  }
+  const root = rootOnFirstUse(new URL(base).hostname, await presentedChain(base));
+  return { pem: `${root.toString().trim()}\n`, firstUse: true, root };
+}
+
+let trustedCa = '';
+
 function request(url, { method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolvePromise, reject) => {
     const u = new URL(url);
@@ -174,9 +270,10 @@ function request(url, { method = 'GET', headers = {}, body } = {}) {
       path: `${u.pathname}${u.search}`,
       method,
       headers: payload ? { ...headers, 'content-length': payload.length } : headers,
-      // The listener certificate is this stack's own. The test tool does the
-      // same: tests/tools/admin-api-token.js sets rejectUnauthorized: false.
-      rejectUnauthorized: false,
+      // Verified against trustAnchor()'s PEM, host name included.
+      ca: trustedCa,
+      minVersion: 'TLSv1.2',
+      agent: false,
     }, (res) => {
       let text = '';
       res.on('data', (chunk) => { text += chunk; });
@@ -305,7 +402,10 @@ async function ensureTestUser(base, token, username, scopes) {
     const created = await admin(base, token, 'POST', '/users/create', body);
     if (!created.body.ok) throw new Error(`creating ${username} was refused: ${JSON.stringify(created.body).slice(0, 300)}`);
     console.log(`Created user ${username}.`);
-    if (created.body.password) console.log(`Generated password for ${username} (shown once): ${created.body.password}`);
+    if (created.body.password) {
+      const file = writePasswordFile(username, created.body.password);
+      console.log(`iya-sts generated ${username}'s password; it is in ${file} (mode 0600), and is not printed.`);
+    }
     if (created.body.credentialError) console.warn(`WARNING: the password was not set: ${created.body.credentialError}`);
   }
   for (const { group } of SSF_ROLES.filter((r) => scopes.includes(r.scope))) {
@@ -313,6 +413,28 @@ async function ensureTestUser(base, token, username, scopes) {
     if (!added.body.ok) throw new Error(`adding ${username} to ${group} was refused: ${JSON.stringify(added.body).slice(0, 300)}`);
     console.log(`${username} ${added.body.changed === false ? 'was already' : 'is now'} in ${group}.`);
   }
+}
+
+/** Where a generated password is kept: from the username alone, never from the password. */
+export function passwordFileFor(username, dir = resolve(repoRoot, 'demo/generated')) {
+  if (!/^[A-Za-z0-9._-]+$/.test(username) || username.startsWith('.')) {
+    throw new Error(`${JSON.stringify(username)} is not a username a file can be named after`);
+  }
+  return join(dir, `${username}.password`);
+}
+
+/** Writes the password to its file, created 0600 (and narrowed to 0600 if it was already there). */
+export function writePasswordFile(username, password, dir) {
+  const file = passwordFileFor(username, dir);
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const fd = openSync(file, 'w', 0o600);
+  try {
+    fchmodSync(fd, 0o600);
+    writeSync(fd, `${password}\n`);
+  } finally {
+    closeSync(fd);
+  }
+  return file;
 }
 
 async function main() {
@@ -325,6 +447,15 @@ async function main() {
   const urls = demoUrls(args);
   const redirectUri = urls.redirectUri;
   const postLogout = urls.postLogout;
+  const anchor = await trustAnchor(oidc.base, args.ca);
+  trustedCa = anchor.pem;
+  if (anchor.firstUse) {
+    console.log(`TLS: trusting ${oidc.base}'s root on first use: ${anchor.root.subject.replace(/\n/g, ', ')}`);
+    console.log(`  sha256 ${anchor.root.fingerprint256}`);
+    console.log('  Compare it with the Root CA on iya-sts\'s Server configuration, PKI page, or pass --ca.');
+  } else {
+    console.log(`TLS: verifying ${oidc.base} against ${args.ca}`);
+  }
   const token = await mintAdminToken(oidc.base, secret);
   await ensure(oidc.base, token, {
     identifier: oidc.clientId,

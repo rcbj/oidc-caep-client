@@ -31,13 +31,16 @@ ADMIN_API_CLIENT_SECRET=… npm run register-iya-sts
 
 - creates the public client (`token_endpoint_auth_method: none`) with the demo's redirect URIs, the file's scopes and the demo's origin for CORS;
 - adds the client to `SSF_READ` and `SSF_MANAGE`, for whichever of `ssf.read` and `ssf.manage` the file asks for (iya-sts issues each only when the application is a member of the role and the person is in its group, `ssf-read` or `ssf-manage`);
-- creates a test user, `caep-demo-user`, in those groups. Its password is `CAEP_DEMO_USER_PASSWORD`, or one is generated and printed once.
+- creates a test user, `caep-demo-user`, in those groups. Its password is `CAEP_DEMO_USER_PASSWORD`, or iya-sts generates one, which the script writes to `demo/generated/caep-demo-user.password` (mode 0600) and does not print.
 
 | Option | Use |
 |---|---|
 | `--public-url url` | The browser-facing URL is not `http://localhost:$PORT`. A non-empty `PUBLIC_URL` names that origin too. |
 | `--config path` | Another OIDC file. |
 | `--test-user name`, `--no-test-user` | Name the test user, or skip it. |
+| `--ca file` | The PEM file (for example iya-sts's Root CA) to verify iya-sts against. `IYA_STS_CA` names it too. |
+
+Every call the script makes is verified. Without `--ca`, it takes the root iya-sts presents in the TLS handshake on first use, after checking that the leaf names the host and that each certificate is signed by the next, and prints the root's SHA-256: compare it with the Root CA on iya-sts's **Server configuration → PKI** page.
 
 The secret is `ADMIN_API_CLIENT_SECRET` or `STS_ADMIN_API_CLIENT_SECRET`. Every step can be repeated safely.
 

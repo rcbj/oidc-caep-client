@@ -14,7 +14,7 @@ Node.js 24.22.1 or later. That is the engines field, `.nvmrc`, and the only vers
 |---|---|
 | `packages/oidc-caep-client` | The library published to npm as `oidc-caep-client`, version line 0.2. Source is `src/*.js` (`oidc-client.js`, `dpop.js`, `pkce.js`, `token-manager.js`, `accounts.js`, `caep/`). Tests are `test/`. The package is published from the source. `npm run build:types` writes declarations under `types/`, which is not committed. |
 | `demo` | The static demo. `demo/server.js` serves `demo/public/` (`app.js`, `oidc.json`). |
-| `scripts` | `register-iya-sts-client.mjs` registers the public client on iya-sts. `version.mjs` stamps the published version. |
+| `scripts` | `register-iya-sts-client.mjs` registers the public client on iya-sts; it verifies every call against `--ca` (the live driver passes the root it checked), or against the root taken on first use, and writes a generated test-user password to `demo/generated/<user>.password` (0600) rather than printing it. `version.mjs` stamps the published version. |
 | `docs` | The GitHub Pages site. |
 | `tools/apidocs` | TypeDoc and JSDoc. It is outside the npm workspace because TypeDoc runs on a different TypeScript than the declaration build. |
 | `Dockerfile`, `docker-compose.yml` | The demo image. Compose publishes `PORT` to the same host port. |
