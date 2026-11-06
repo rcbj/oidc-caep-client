@@ -61,8 +61,7 @@ Versions follow the usual npm form ([`scripts/version.mjs`](https://github.com/r
 | Push to | Publishes | npm dist-tag | Example |
 |---|---|---|---|
 | `main` | a release, `M.N.P` | `latest` | `0.2.0`, `0.2.1`, … |
-| `develop` | a pre-release of the next release, `M.N.P-next.R` | `next` | `0.2.1-next.0`, `0.2.1-next.1`, … |
 
-npm never resolves a range like `^0.2.0` to a pre-release, so a `develop` build only reaches someone who installs `@next`. `npm run version:print` shows the next release version; add `-- --channel next` for the next pre-release.
+A push to `develop` publishes nothing, so every release tag is on `main`. A pre-release, `M.N.P-next.R` under `next`, comes only from running the workflow by hand on `main`. npm never resolves a range like `^0.2.0` to a pre-release, so one only reaches someone who installs `@next`. `npm run version:print` shows the next release version; add `-- --channel next` for the next pre-release.
 
 A pull request builds, tests and packs, and publishes nothing. Each published commit is tagged `v<version>`. Publishing uses the repository secret `NPM_TOKEN`, or npm trusted publishing once it is configured.
