@@ -8,8 +8,8 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^5.2.1",
-    "jose": "^6.2.12",
+    "express": "^5.3.0",
+    "jose": "^6.2.14",
     "oidc-caep-client": "0.2.0"
   },
   "license": "MIT",
