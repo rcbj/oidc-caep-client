@@ -86,7 +86,7 @@ An explicit `PUBLIC_URL` replaces the origin and keeps the path. The default `ht
 
 ## Releases
 
-`main` publishes `M.N.P` as npm `latest`. `develop` publishes `M.N.P-next.R` as `next`. The patch is chosen at publish time by `scripts/version.mjs` from the versions already on npm. After bumping `VERSION`, run `npm run version:sync`.
+`main` publishes `M.N.P` as npm `latest`. `develop` publishes nothing, so every release tag is on `main`. `M.N.P-next.R` under `next` comes only from running the workflow by hand on `main`. The patch is chosen at publish time by `scripts/version.mjs` from the versions already on npm. After bumping `VERSION`, run `npm run version:sync`.
 
 `.github/workflows/npm-publish.yml` runs only when the push changes the package directory (not its tests), `VERSION`, or `package-lock.json`. A change that is only this file, the demo, the docs, the tests, `scripts/version.mjs`, or that workflow does not publish. Every publish, `latest` and `next`, gets a tag and a GitHub Release; `next` is marked a pre-release. A pull request packs and publishes nothing.
 

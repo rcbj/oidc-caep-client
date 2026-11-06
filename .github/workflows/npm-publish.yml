@@ -8,16 +8,14 @@
 # build and no version commit is needed:
 #   - main publishes a release, M.N.P: one more than the highest M.N release
 #     published (0.2.0, 0.2.1, ...);
-#   - develop publishes a pre-release of the release that comes next,
-#     M.N.P-next.R (0.2.1-next.0, 0.2.1-next.1, ...). npm never resolves a
-#     range like ^0.2.0 to a pre-release.
+#   - a pre-release, M.N.P-next.R, is one a person asks for: Run workflow on main,
+#     channel next. npm never resolves a range like ^0.1.0 to a pre-release.
 # The committed package.json says M.N.0; `--set` writes the real version into
 # the workspace copy just before packing.
 #
 # WHEN IT PUBLISHES, as iya-sts's build-container.yml does for images:
 #   - a push to main publishes a release under the npm dist-tag `latest`;
-#   - a push to develop publishes a pre-release under `next`, so `npm install`
-#     never picks it up by accident;
+#   - nothing publishes from develop, so every release tag is on main;
 #   - a pull request builds, tests and packs, and publishes nothing;
 #   - Run workflow (workflow_dispatch) publishes on the channel chosen: latest
 #     (a release) or next (a pre-release).
@@ -42,7 +40,7 @@ name: Publish the npm package
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
     paths:
       - packages/oidc-caep-client/**
       - '!packages/oidc-caep-client/test/**'
@@ -101,7 +99,7 @@ jobs:
       - name: Check the manifests follow VERSION
         run: node scripts/version.mjs --check-manifests
 
-      # main releases M.N.P; develop (and a pull request's dry run) a pre-release, M.N.P-next.R.
+      # main releases M.N.P; a pull request's dry run, and Run workflow's next, a pre-release, M.N.P-next.R.
       # The numbers come from the versions already on npm (scripts/version.mjs).
       - name: Choose the channel
         id: channel
@@ -149,7 +147,8 @@ jobs:
 
   publish:
     needs: build
-    if: github.event_name != 'pull_request'
+    # Only from main: the tag this job creates has to be on main.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # `npm` is the environment a trusted publisher names; add required reviewers
     # to it in Settings → Environments to hold every publish for approval.

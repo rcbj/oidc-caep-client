@@ -30,7 +30,7 @@ That adds it to the `dependencies` in your `package.json`:
 
 **Versions** are ordinary semver: `0.2.0`, `0.2.1`, … `^0.2.0` takes every later 0.2 release and nothing from 0.3, which may change the API. For a reproducible build, pin one version (`"oidc-caep-client": "0.2.1"`) and let your lock file record it.
 
-**Release channels.** `latest` (the default) is built from `main`. `next` is built from `develop`, ahead of a release, as pre-releases such as `0.2.1-next.3`: `npm install oidc-caep-client@next`. A range like `^0.2.0` never resolves to a pre-release.
+**Release channels.** `latest` (the default) is built from `main`. `next` holds pre-releases such as `0.2.1-next.3`, published by hand from `main` when one is needed: `npm install oidc-caep-client@next`. A range like `^0.2.0` never resolves to a pre-release.
 
 **TypeScript.** The package ships type declarations (`types/*.d.ts`, generated from the source's JSDoc), so TypeScript finds them through `package.json` with nothing to install or configure. The library itself stays JavaScript, and works the same from both:
 
