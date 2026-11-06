@@ -21,8 +21,9 @@
 #   - a pull request builds, tests and packs, and publishes nothing;
 #   - Run workflow (workflow_dispatch) publishes on the channel chosen: latest
 #     (a release) or next (a pre-release).
-# Only a change to the package, VERSION, the versioner, the lock file or this
-# workflow publishes. A demo-only change doesn't release the library.
+# Only a change to the package (not its tests), VERSION or the lock file
+# publishes. A change to the demo, the tests, the versioner or this workflow
+# doesn't release the library; a pull request still dry-runs those.
 #
 # AUTHENTICATION. The publish job can use either of two credentials:
 #   - npm trusted publishing (OIDC): no secret. Configure it on npmjs.com under
@@ -35,8 +36,8 @@
 # Either way the package is published with provenance (`--provenance`): npm
 # shows which commit and workflow run built it.
 #
-# After a publish, the commit is tagged `v<version>`, so the npm version leads
-# back to the source.
+# After a publish, the commit gets the tag `v<version>` and a GitHub Release, so
+# the npm version leads back to the source.
 name: Publish the npm package
 
 on:
@@ -44,13 +45,13 @@ on:
     branches: [main, develop]
     paths:
       - packages/oidc-caep-client/**
+      - '!packages/oidc-caep-client/test/**'
       - VERSION
       - package-lock.json
-      - scripts/version.mjs
-      - .github/workflows/npm-publish.yml
   pull_request:
     paths:
       - packages/oidc-caep-client/**
+      - '!packages/oidc-caep-client/test/**'
       - VERSION
       - package-lock.json
       - scripts/version.mjs
@@ -187,7 +188,13 @@ jobs:
             --access public --provenance --tag "${{ steps.tag.outputs.dist_tag }}"
           echo "Published oidc-caep-client@${{ needs.build.outputs.version }} as ${{ steps.tag.outputs.dist_tag }}." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Tag the commit
+      # A release and a pre-release alike: everything on npm has a tag and a GitHub Release.
+      - name: Create the tag and the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.build.outputs.version }}
+          CHANNEL: ${{ needs.build.outputs.channel }}
         run: |
-          git tag "v${{ needs.build.outputs.version }}" "${GITHUB_SHA}"
-          git push origin "v${{ needs.build.outputs.version }}"
+          flags=""
+          if [ "$CHANNEL" = "next" ]; then flags="--prerelease --latest=false"; fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes $flags
