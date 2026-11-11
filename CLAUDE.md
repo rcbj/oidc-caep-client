@@ -68,7 +68,7 @@ The demo's signal handlers await `accounts.end()`. Ending an account stops its s
 
 TLS: the host script takes the one self-signed certificate from the chain `GET /tls/server-certificate` serves (`CN = sts Root CA`), verifies iya-sts against it, and mounts it into the browser container, which adds it to Chromium's NSS database (`certutil`, trust `C,,`). The browser is never told to ignore certificate errors. Container names: `iya-sts-live-oidc-caep-client`, `oidc-caep-client-live-demo`, `oidc-caep-client-live-browser`; images `oidc-caep-client-live:demo` and `oidc-caep-client-live:browser`. Never bind 3000, 8081 or 18481 to 18495.
 
-`.github/workflows/nightly.yml` runs at 06:15 UTC (`15 6 * * *`) and on demand: the unit suite in the Node image, then the live test. `tests.yml` has no schedule.
+`.github/workflows/nightly.yml` runs at 06:15 UTC (`15 6 * * *`) and on demand: the unit suite in `node:24.22.1-bookworm-slim`, then the live test. That image has no `openssl`, and `scripts/register-iya-sts-client.test.mjs` mints the TLS suite's certificates with it, so the job installs `openssl` before `npm test` (#74). `tests.yml` has no schedule.
 
 ## Demo
 
