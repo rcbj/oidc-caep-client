@@ -24,6 +24,12 @@ jobs:
       - name: Unit suite
         run: |
           docker run --rm -v "$PWD":/src:ro node:24.22.1-bookworm-slim sh -ec '
+            # The TLS suite mints certificates with openssl. The slim image
+            # does not ship it (spawnSync openssl ENOENT, #74).
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends openssl
+            rm -rf /var/lib/apt/lists/*
             mkdir /app && cd /src
             tar --exclude=./node_modules --exclude=./.git -cf - . | tar -xf - -C /app
             cd /app
